@@ -60,6 +60,29 @@ class RollbackStack:
         """
         self.actions.append(RollbackAction(description, action, critical))
 
+    def push(
+        self,
+        action: Callable[[], None],
+        description: str,
+        critical: bool = False,
+    ) -> None:
+        """Add a rollback action to the stack (alias for add with swapped args).
+
+        Args:
+            action: Callable to execute for rollback
+            description: Human-readable description
+            critical: If True, rollback stops on failure
+        """
+        self.add(description, action, critical)
+
+    def has_items(self) -> bool:
+        """Check if there are any rollback actions in the stack.
+
+        Returns:
+            True if there are actions to rollback
+        """
+        return len(self.actions) > 0
+
     def commit(self) -> None:
         """Mark transaction as successful - rollback won't run."""
         self.committed = True
@@ -83,6 +106,10 @@ class RollbackStack:
                         f"Critical rollback action failed: {action.description}",
                         details=[str(e)],
                     )
+
+    def rollback_all(self) -> None:
+        """Execute all rollback actions in reverse order (alias for rollback)."""
+        self.rollback()
 
 
 @dataclass
