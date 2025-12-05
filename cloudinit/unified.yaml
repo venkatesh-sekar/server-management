@@ -8,11 +8,7 @@
 # ============================================================================
 
 # SM CLI Configuration
-# Where to download SM from (use your fork or the upstream repo)
-# Examples:
-#   - https://github.com/your-username/server-management.git
-#   - https://github.com/venkatesh-sekar/server-management.git
-SM_REPO_URL: "https://github.com/YOUR_USERNAME/server-management.git"
+SM_REPO_URL: "https://github.com/venkatesh-sekar/server-management.git"
 
 # Which branch/tag to use (main, v1.0.0, develop, etc.)
 SM_BRANCH: "main"
@@ -78,7 +74,7 @@ write_files:
   # Docker daemon.json (MTU fix for Hetzner Cloud VXLAN overlay networks)
   - path: /etc/docker/daemon.json
     owner: root:root
-    permissions: '0644'
+    permissions: "0644"
     content: |
       {
         "log-driver": "json-file",
