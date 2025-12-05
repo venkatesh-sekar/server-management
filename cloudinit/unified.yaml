@@ -101,10 +101,8 @@ runcmd:
   # Clone the server-management repository
   - git clone --branch "${SM_BRANCH}" "${SM_REPO_URL}" /opt/sm
 
-  # Ensure pipx path is available
-  - pipx ensurepath
-
-  # Install SM CLI using pipx (isolated environment)
+  # Install SM CLI using pipx (isolated environment, globally available)
+  # PIPX_BIN_DIR=/usr/local/bin ensures 'sm' command is immediately available
   - PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install /opt/sm
 
   # Verify installation
