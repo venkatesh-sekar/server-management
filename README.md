@@ -13,6 +13,19 @@ A secure, production-ready CLI for managing servers on Debian/Ubuntu.
 
 ## Installation
 
+### Quick Install (Recommended for Servers)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/venkatesh-sekar/server-management/main/install.sh | sudo bash
+```
+
+Install a specific branch:
+```bash
+curl -fsSL https://raw.githubusercontent.com/venkatesh-sekar/server-management/main/install.sh | sudo bash -s -- --branch develop
+```
+
+### Development Install
+
 ```bash
 # Install with pip (Python 3.12+)
 pip install -e ".[dev]"
