@@ -1,0 +1,177 @@
+#cloud-config
+# ============================================================================
+# Example: Docker Swarm Worker with Observability
+# ============================================================================
+# This is a pre-configured example for a Docker Swarm worker node with:
+# - Docker with MTU 1450 fix
+# - Security hardening (fail2ban, auditd)
+# - OpenTelemetry metrics and logs export
+#
+# Usage:
+# 1. Replace YOUR_USERNAME with your GitHub username
+# 2. Replace the OTLP_ENDPOINT with your monitoring server
+# 3. Optionally set HOSTNAME
+# 4. Paste into Hetzner Cloud console when creating a server
+# ============================================================================
+
+# SM CLI Configuration
+SM_REPO_URL: "https://github.com/YOUR_USERNAME/server-management.git"
+SM_BRANCH: "main"
+
+# Component Toggles
+ENABLE_DOCKER: true              # Install Docker for containerized workloads
+ENABLE_SECURITY: true            # Enable security hardening
+ENABLE_OBSERVABILITY: true       # Enable metrics and logs export
+ENABLE_POSTGRES: false           # Not needed for Docker-only worker
+
+# Parameters
+OTLP_ENDPOINT: "http://monitoring.internal:4318"  # Replace with your monitoring server
+HOSTNAME: ""                     # Optional: Set to something like "swarm-worker-01"
+
+# ============================================================================
+# DO NOT EDIT BELOW THIS LINE
+# ============================================================================
+
+# System Updates
+package_update: true
+package_upgrade: true
+
+# Base Packages
+packages:
+  - git
+  - python3
+  - python3-pip
+  - python3-venv
+  - curl
+  - gnupg
+  - apt-transport-https
+  - ca-certificates
+
+# Configuration Files
+write_files:
+  # Docker daemon.json (MTU fix for Hetzner Cloud VXLAN overlay networks)
+  - path: /etc/docker/daemon.json
+    owner: root:root
+    permissions: '0644'
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "10m",
+          "max-file": "3"
+        },
+        "default-network-opts": {
+          "overlay": {
+            "com.docker.network.driver.mtu": "1450"
+          }
+        }
+      }
+
+# Setup Commands
+runcmd:
+  # ============================================================================
+  # Phase 1: Bootstrap SM CLI
+  # ============================================================================
+
+  - echo "==> Phase 1: Installing SM CLI from ${SM_REPO_URL} (${SM_BRANCH})"
+
+  # Clone the server-management repository
+  - git clone --branch "${SM_BRANCH}" "${SM_REPO_URL}" /opt/sm
+
+  # Install SM CLI globally using pip
+  - pip3 install --break-system-packages /opt/sm
+
+  # Create symlink for easy access
+  - ln -sf /usr/local/bin/sm /usr/bin/sm
+
+  # Verify installation
+  - sm --version
+
+  # ============================================================================
+  # Phase 2: Install Docker (if enabled)
+  # ============================================================================
+
+  - |
+    if [ "${ENABLE_DOCKER}" = "true" ]; then
+      echo "==> Phase 2: Installing Docker with MTU 1450 fix"
+      curl -fsSL https://get.docker.com | sh
+      systemctl enable docker
+      systemctl start docker
+      systemctl restart docker
+      echo "Docker installed and configured successfully"
+    else
+      echo "==> Phase 2: Skipping Docker installation (ENABLE_DOCKER=false)"
+    fi
+
+  # ============================================================================
+  # Phase 3: Security Hardening (highly recommended)
+  # ============================================================================
+
+  - |
+    if [ "${ENABLE_SECURITY}" = "true" ]; then
+      echo "==> Phase 3: Running security hardening"
+      sm security harden
+      echo "Security hardening completed"
+    else
+      echo "==> Phase 3: Skipping security hardening (ENABLE_SECURITY=false)"
+    fi
+
+  # ============================================================================
+  # Phase 4: Observability Setup (if enabled)
+  # ============================================================================
+
+  - |
+    if [ "${ENABLE_OBSERVABILITY}" = "true" ]; then
+      echo "==> Phase 4: Setting up observability"
+      if [ -n "${OTLP_ENDPOINT}" ]; then
+        sm observability setup --otlp-endpoint="${OTLP_ENDPOINT}"
+        echo "Observability setup completed"
+      else
+        echo "ERROR: ENABLE_OBSERVABILITY=true but OTLP_ENDPOINT is empty" >&2
+        echo "Please set OTLP_ENDPOINT in the configuration variables" >&2
+        exit 1
+      fi
+    else
+      echo "==> Phase 4: Skipping observability setup (ENABLE_OBSERVABILITY=false)"
+    fi
+
+  # ============================================================================
+  # Phase 5: PostgreSQL Setup (if enabled)
+  # ============================================================================
+
+  - |
+    if [ "${ENABLE_POSTGRES}" = "true" ]; then
+      echo "==> Phase 5: Installing PostgreSQL 18"
+      sm postgres setup --skip-backup
+      echo "PostgreSQL installed successfully"
+      echo "For full setup with PgBouncer and backups, run: sm postgres setup"
+    else
+      echo "==> Phase 5: Skipping PostgreSQL installation (ENABLE_POSTGRES=false)"
+    fi
+
+  # ============================================================================
+  # Phase 6: Set Custom Hostname (if provided)
+  # ============================================================================
+
+  - |
+    if [ -n "${HOSTNAME}" ]; then
+      echo "==> Setting hostname to: ${HOSTNAME}"
+      hostnamectl set-hostname "${HOSTNAME}"
+    fi
+
+# Final Message
+final_message: |
+  ============================================================================
+  Server Setup Complete!
+  ============================================================================
+
+  The SM CLI has been installed and your server is configured.
+
+  Available commands:
+    sm --help              # Show all available commands
+    sm postgres --help     # PostgreSQL management
+    sm security --help     # Security hardening
+    sm observability --help # Observability setup
+
+  Logs: /var/log/cloud-init-output.log
+  ============================================================================

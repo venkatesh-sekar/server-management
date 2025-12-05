@@ -4,6 +4,7 @@ A secure, production-ready CLI for managing servers on Debian/Ubuntu.
 
 ## Features
 
+- **Cloud-Init Generator**: Generate cloud-init configs for Hetzner servers with Docker MTU fixes
 - **PostgreSQL Management**: Setup PostgreSQL 18 with PgBouncer, pgBackRest backups, user/database management
 - **Security Hardening**: fail2ban (SSH protection), auditd (security auditing), unattended-upgrades
 - **Observability**: OpenTelemetry Collector for host metrics and log collection
@@ -36,6 +37,37 @@ sm config validate
 ```
 
 ## Command Reference
+
+### Cloud-Init for Hetzner Servers
+
+Use the unified cloud-init template to set up servers:
+
+```bash
+# 1. Copy the template
+cp cloudinit/unified.yaml my-server.yaml
+
+# 2. Edit variables at the top
+# - SM_REPO_URL: Your fork or upstream repo
+# - ENABLE_DOCKER: true/false
+# - ENABLE_SECURITY: true/false (highly recommended)
+# - ENABLE_OBSERVABILITY: true/false
+# - ENABLE_POSTGRES: true/false
+# - OTLP_ENDPOINT: Your monitoring endpoint (if observability enabled)
+
+# 3. Paste into Hetzner Cloud Console or use with CLI
+hcloud server create --name worker-1 --user-data-from-file my-server.yaml
+```
+
+**What it does:**
+- ✅ Automatically installs SM CLI from GitHub
+- ✅ Configures Docker with MTU 1450 fix (critical for Hetzner!)
+- ✅ Sets up security hardening (fail2ban, auditd)
+- ✅ Optionally enables observability and PostgreSQL
+- ✅ Self-contained - no local SM CLI installation needed
+
+**Why Docker MTU fix?** Hetzner private networks use VXLAN (MTU 1450). Docker's default overlay MTU is 1500. Mismatch causes silent packet drops and S3/external connectivity failures.
+
+**See:** [docs/UNIFIED_CLOUDINIT.md](docs/UNIFIED_CLOUDINIT.md) for detailed guide and examples.
 
 ### PostgreSQL Setup
 
