@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# Bootstrap security + observability stack on Debian/Ubuntu
+# Bootstrap observability stack on Debian/Ubuntu
 #
-# - Installs: curl, fail2ban, unattended-upgrades, auditd, jq, ca-certificates
-# - Configures: basic SSH protection via fail2ban
-# - Configures: auditd baseline rules for critical files (Optimized for low noise)
 # - Installs: OpenTelemetry Collector (contrib)
+# - Configures: Host metrics collection (CPU, memory, disk, network, etc.)
+# - Configures: Log collection (fail2ban, auth, audit logs)
 # - Sends to SigNoz via OTLP
+#
 
 set -euo pipefail
 
@@ -18,7 +18,7 @@ set -euo pipefail
 OTEL_VERSION="0.104.0"
 OTEL_URL="https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${OTEL_VERSION}/otelcol-contrib_${OTEL_VERSION}_linux_amd64.tar.gz"
 INSTALL_DIR="/opt/otel-host"
-SERVICE_NAME="otel-host-security"
+SERVICE_NAME="otel-host-metrics"
 
 # SigNoz OTLP endpoint - will be prompted if not set via environment
 SIGNOZ_OTLP="${SIGNOZ_OTLP:-}"
@@ -120,96 +120,9 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y --no-install-recommends \
   curl wget jq ca-certificates \
-  fail2ban unattended-upgrades python3-systemd \
-  auditd audispd-plugins \
   net-tools gnupg
 
 log_info "Base packages installed."
-
-# ==========================
-# --- UNATTENDED-UPGRADES ---
-# ==========================
-
-log_info "Configuring unattended-upgrades for security updates..."
-# Ensure the config file exists before attempting reconfigure
-if [[ -f /etc/apt/apt.conf.d/20auto-upgrades ]]; then
-    touch /etc/apt/apt.conf.d/20auto-upgrades
-fi
-dpkg-reconfigure --priority=low unattended-upgrades || true
-log_info "unattended-upgrades configured."
-
-# ==========================
-# --- FAIL2BAN CONFIG -------
-# ==========================
-
-log_info "Configuring fail2ban for SSH brute-force protection..."
-JAIL_LOCAL="/etc/fail2ban/jail.local"
-
-if [[ -f "${JAIL_LOCAL}" ]]; then
-  log_warn "${JAIL_LOCAL} already exists. Skipping creation."
-else
-  cat > "${JAIL_LOCAL}" <<'EOF'
-[DEFAULT]
-bantime  = 10m
-findtime = 10m
-maxretry = 5
-
-[sshd]
-enabled = true
-port    = ssh
-logpath = %(sshd_log)s
-backend = systemd
-EOF
-  log_info "Created ${JAIL_LOCAL}."
-fi
-
-# Ensure fail2ban is enabled (ignore errors if strictly no systemd, unlikely)
-systemctl enable fail2ban || true
-systemctl restart fail2ban || true
-
-# ==========================
-# --- AUDITD CONFIG ---------
-# ==========================
-
-log_info "Configuring auditd baseline rules..."
-AUDIT_RULES_DIR="/etc/audit/rules.d"
-AUDIT_RULES_FILE="${AUDIT_RULES_DIR}/hardening.rules"
-
-mkdir -p "${AUDIT_RULES_DIR}"
-
-# Updated rules based on "recursion bomb" fix
-if [[ -f "${AUDIT_RULES_FILE}" ]]; then
-  log_warn "${AUDIT_RULES_FILE} already exists. Skipping creation."
-else
-  cat > "${AUDIT_RULES_FILE}" <<'EOF'
-## Auditd baseline rules - HARDENING ONLY
-## We do not watch log files here because we are already ingesting them via OTEL.
-
-# 1. Identity & Credentials (User modification)
--w /etc/passwd  -p wa -k identity
--w /etc/shadow  -p wa -k identity
--w /etc/group   -p wa -k identity
--w /etc/gshadow -p wa -k identity
-
-# 2. Privileged Access (Sudo changes)
--w /etc/sudoers -p wa -k scope
--w /etc/sudoers.d/ -p wa -k scope
-
-# 3. Remote Access Config (SSHD changes)
--w /etc/ssh/sshd_config -p wa -k sshd_config
-
-## NOTE: We explicitly DO NOT watch /var/log/auth.log or /var/log/audit/
-## to prevent feedback loops and duplicate data ingestion.
-EOF
-fi
-
-systemctl enable auditd
-# Auditd sometimes fails to restart if it's already running in immutable mode, usually harmless
-service auditd restart || echo "Auditd restart signal sent."
-
-if command -v augenrules >/dev/null 2>&1; then
-  augenrules --load || true
-fi
 
 # ==========================
 # --- OTEL COLLECTOR INSTALL
@@ -226,7 +139,7 @@ else
   log_info "Downloading otelcol-contrib..."
   # Use a temp file for download
   curl -L -f -o otelcol.tar.gz "${OTEL_URL}"
-  
+
   # Basic integrity check (tarball shouldn't be empty)
   if [[ ! -s otelcol.tar.gz ]]; then
      log_error "Downloaded file is empty. Check OTEL_URL."
@@ -350,7 +263,7 @@ log_info "Creating systemd service: ${SERVICE_NAME}"
 
 cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
-Description=OpenTelemetry Host Security & Metrics Agent
+Description=OpenTelemetry Host Metrics & Logs Agent
 After=network.target
 
 [Service]
@@ -370,3 +283,6 @@ systemctl enable "${SERVICE_NAME}"
 systemctl restart "${SERVICE_NAME}"
 
 log_info "Setup Complete. Service ${SERVICE_NAME} is running."
+log_info "  - Host metrics: CPU, memory, disk, network, etc."
+log_info "  - Log collection: fail2ban, auth, audit logs"
+log_info "  - Exporting to: ${SIGNOZ_OTLP}"
