@@ -5,6 +5,7 @@ A secure, production-ready CLI for managing servers on Debian/Ubuntu.
 ## Features
 
 - **Cloud-Init Generator**: Generate cloud-init configs for Hetzner servers with Docker MTU fixes
+- **Docker Management**: Fix MTU issues on Hetzner Cloud (1450 for VXLAN overlay networks)
 - **PostgreSQL Management**: Setup PostgreSQL 18 with PgBouncer, pgBackRest backups, user/database management
 - **Security Hardening**: fail2ban (SSH protection), auditd (security auditing), unattended-upgrades
 - **Observability**: OpenTelemetry Collector for host metrics and log collection
@@ -68,6 +69,29 @@ hcloud server create --name worker-1 --user-data-from-file my-server.yaml
 **Why Docker MTU fix?** Hetzner private networks use VXLAN (MTU 1450). Docker's default overlay MTU is 1500. Mismatch causes silent packet drops and S3/external connectivity failures.
 
 **See:** [docs/UNIFIED_CLOUDINIT.md](docs/UNIFIED_CLOUDINIT.md) for detailed guide and examples.
+
+### Docker MTU Fix
+
+For existing servers not provisioned with cloud-init, you can manually fix Docker MTU:
+
+```bash
+# Apply MTU 1450 fix for Hetzner Cloud
+sudo sm docker fix-mtu
+
+# Preview what would happen
+sm docker fix-mtu --dry-run
+
+# Use custom MTU value
+sudo sm docker fix-mtu --mtu=1400
+```
+
+**What it does:**
+- ✅ Creates/updates `/etc/docker/daemon.json` with MTU configuration
+- ✅ Preserves existing Docker settings (logs, etc.)
+- ✅ Restarts Docker daemon to apply changes
+- ✅ Automatic rollback on errors
+
+**When to use:** Apply this fix on existing Hetzner Cloud servers experiencing packet drops or S3 connectivity issues.
 
 ### PostgreSQL Setup
 

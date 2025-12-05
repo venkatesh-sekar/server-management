@@ -57,9 +57,16 @@ config_app = typer.Typer(
     no_args_is_help=True,
 )
 
+docker_app = typer.Typer(
+    name="docker",
+    help="Docker management and fixes.",
+    no_args_is_help=True,
+)
+
 # Import sub-commands
 from sm.commands.postgres.user import app as postgres_user_app
 from sm.commands.postgres.db import app as postgres_db_app
+from sm.commands.docker import app as docker_commands_app
 
 # Register postgres sub-commands
 postgres_app.add_typer(postgres_user_app, name="user")
@@ -70,6 +77,7 @@ app.add_typer(postgres_app, name="postgres")
 app.add_typer(security_app, name="security")
 app.add_typer(observability_app, name="observability")
 app.add_typer(config_app, name="config")
+app.add_typer(docker_commands_app, name="docker")
 
 
 # Type aliases for common options
