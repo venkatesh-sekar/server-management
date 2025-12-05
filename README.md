@@ -70,9 +70,11 @@ hcloud server create --name worker-1 --user-data-from-file my-server.yaml
 
 **See:** [docs/UNIFIED_CLOUDINIT.md](docs/UNIFIED_CLOUDINIT.md) for detailed guide and examples.
 
-### Docker MTU Fix
+### Docker MTU Management
 
 For existing servers not provisioned with cloud-init, you can manually fix Docker MTU:
+
+#### Apply MTU Fix
 
 ```bash
 # Apply MTU 1450 fix for Hetzner Cloud
@@ -92,6 +94,49 @@ sudo sm docker fix-mtu --mtu=1400
 - ✅ Automatic rollback on errors
 
 **When to use:** Apply this fix on existing Hetzner Cloud servers experiencing packet drops or S3 connectivity issues.
+
+#### Check MTU Configuration
+
+```bash
+# Check if MTU fix is applied
+sm docker check-mtu
+```
+
+**What it checks:**
+- ✅ Verifies `/etc/docker/daemon.json` has MTU configuration
+- ✅ Checks Docker daemon is running
+- ✅ Lists overlay networks and their current MTU values
+- ✅ Identifies networks that need recreation
+
+#### List Networks with MTU Values
+
+```bash
+# List all Docker networks with their MTU
+sm docker list-networks
+```
+
+Shows all networks grouped by driver type (bridge, overlay, host) with their MTU values.
+
+#### Recreate Networks with Correct MTU
+
+```bash
+# Recreate a network with proper MTU
+sudo sm docker recreate-network my_network
+
+# Preview what would happen
+sm docker recreate-network my_network --dry-run
+
+# Force recreation even with connected containers
+sudo sm docker recreate-network my_network --force
+```
+
+**What it does:**
+- ✅ Preserves network configuration (subnet, gateway, etc.)
+- ✅ Removes old network and creates new one with correct MTU
+- ✅ Warns if containers are connected
+- ✅ Shows commands to reconnect containers
+
+**Important:** Networks created *before* applying the MTU fix will still have incorrect MTU (1500). You must recreate them to apply the new MTU (1450).
 
 ### PostgreSQL Setup
 
