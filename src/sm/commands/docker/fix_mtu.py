@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from sm.core.context import ExecutionContext
-from sm.core.executor import RollbackStack
+from sm.core.executor import CommandExecutor, RollbackStack
 from sm.core.exceptions import ExecutionError, ValidationError
 from sm.services.systemd import SystemdService
 
@@ -146,16 +146,13 @@ class DockerMTUFixer:
 
     def restart_docker(self) -> None:
         """Restart Docker daemon to apply changes."""
-        self.ctx.console.step("Restarting Docker daemon")
-
         if self.ctx.dry_run:
             self.ctx.console.info("Would restart Docker daemon")
             return
 
-        docker = SystemdService("docker", self.ctx)
-        docker.restart()
-
-        self.ctx.console.success("Docker daemon restarted")
+        executor = CommandExecutor(self.ctx)
+        systemd = SystemdService(self.ctx, executor)
+        systemd.restart("docker", description="Restarting Docker daemon")
 
     def verify_config(self, mtu: int) -> None:
         """Verify the MTU configuration is active."""
