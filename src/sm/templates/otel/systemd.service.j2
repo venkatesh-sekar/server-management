@@ -1,0 +1,14 @@
+[Unit]
+Description=OpenTelemetry Host Metrics & Logs Agent
+After=network.target
+
+[Service]
+ExecStart={{ install_dir }}/otelcol --config={{ install_dir }}/config.yaml
+Restart=always
+RestartSec=5
+# Running as root required to read /var/log/audit/audit.log and /var/log/auth.log
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
