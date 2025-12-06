@@ -15,6 +15,127 @@ app = typer.Typer(
 )
 
 
+@app.command("install")
+def install_cmd(
+    mtu: Annotated[
+        int,
+        typer.Option(
+            "--mtu",
+            help="MTU value for overlay networks (default: 1450 for Hetzner Cloud)",
+        ),
+    ] = 1450,
+    skip_mtu_fix: Annotated[
+        bool,
+        typer.Option(
+            "--skip-mtu-fix",
+            help="Skip MTU configuration (not recommended for Hetzner)",
+            is_flag=True,
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Preview changes without executing.",
+            is_flag=True,
+        ),
+    ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            "-y",
+            help="Skip confirmation prompts.",
+            is_flag=True,
+        ),
+    ] = False,
+    verbose: Annotated[
+        int,
+        typer.Option(
+            "--verbose",
+            "-v",
+            count=True,
+            help="Increase output verbosity.",
+        ),
+    ] = 0,
+    no_color: Annotated[
+        bool,
+        typer.Option(
+            "--no-color",
+            help="Disable colored output.",
+            is_flag=True,
+        ),
+    ] = False,
+) -> None:
+    """Install Docker with Hetzner Cloud MTU fix.
+
+    Downloads and installs Docker from get.docker.com, then configures
+    the daemon with MTU 1450 for overlay networks (Hetzner VXLAN fix).
+
+    [bold]What this does:[/bold]
+    - Installs Docker via official get.docker.com script
+    - Configures /etc/docker/daemon.json with MTU settings
+    - Enables and starts Docker service
+
+    [bold]Prerequisites:[/bold]
+    - Debian or Ubuntu system
+    - Root access
+    - Internet connectivity
+
+    [bold]Examples:[/bold]
+
+        # Install Docker with MTU fix (recommended)
+        sudo sm docker install
+
+        # Preview what would happen
+        sm docker install --dry-run
+
+        # Install without MTU fix (not recommended for Hetzner)
+        sudo sm docker install --skip-mtu-fix
+    """
+    import os
+    from sm.commands.docker.install import run_install
+    from sm.core.context import create_context
+    from sm.core.exceptions import SMError
+
+    ctx = create_context(
+        dry_run=dry_run,
+        force=False,
+        yes=yes,
+        verbose=verbose,
+        no_color=no_color,
+    )
+
+    # Check root
+    if os.geteuid() != 0:
+        ctx.console.error("This operation requires root privileges")
+        ctx.console.hint("Run with: sudo sm docker install")
+        raise typer.Exit(6)
+
+    # Show configuration
+    ctx.console.print()
+    ctx.console.print("[bold]Docker Installation Configuration[/bold]")
+    ctx.console.print(f"  MTU value:      {mtu}")
+    ctx.console.print(f"  Apply MTU fix:  {'No' if skip_mtu_fix else 'Yes'}")
+    ctx.console.print()
+
+    if not yes and not dry_run:
+        if not ctx.console.confirm("Proceed with Docker installation?"):
+            ctx.console.warn("Operation cancelled")
+            raise typer.Exit(0)
+
+    try:
+        run_install(ctx, mtu, skip_mtu_fix)
+    except SMError as e:
+        ctx.console.error(e.message)
+        if e.details:
+            for detail in e.details:
+                ctx.console.print(f"  [dim]{detail}[/dim]")
+        if e.hint:
+            ctx.console.hint(e.hint)
+        raise typer.Exit(e.exit_code)
+
+
 @app.command("fix-mtu")
 def fix_mtu_cmd(
     mtu: Annotated[
