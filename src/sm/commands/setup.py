@@ -3,9 +3,12 @@
 One command to configure all server components.
 """
 
+import subprocess
 from typing import Optional
+
 from sm.core.context import ExecutionContext
 from sm.core.exceptions import SMError
+from sm.core.safety import run_preflight_checks
 
 
 def run_setup(
@@ -16,6 +19,7 @@ def run_setup(
     postgres: bool = False,
     otlp_endpoint: Optional[str] = None,
     hostname: Optional[str] = None,
+    mtu: Optional[int] = None,
 ) -> None:
     """Run server setup with selected components.
 
@@ -27,6 +31,7 @@ def run_setup(
         postgres: Setup PostgreSQL
         otlp_endpoint: OTLP endpoint for observability
         hostname: Set server hostname
+        mtu: Docker MTU value (default 1450 for Hetzner)
     """
     components = []
     if docker:
@@ -48,6 +53,14 @@ def run_setup(
     ctx.console.print("[bold]Server Setup[/bold]")
     ctx.console.print(f"  Components: {', '.join(components)}")
     ctx.console.print()
+
+    # Run preflight checks
+    if not ctx.dry_run:
+        ctx.console.step("Running preflight checks")
+        run_preflight_checks(dry_run=ctx.dry_run)
+        ctx.console.success("Preflight checks passed")
+    else:
+        ctx.console.dry_run("Would run preflight checks (root, OS, disk space)")
 
     # Validate observability requirements
     if observability and not otlp_endpoint:
@@ -77,11 +90,22 @@ def run_setup(
     # Docker
     if docker:
         ctx.console.step("Installing Docker")
+        docker_mtu = mtu if mtu is not None else 1450
         if ctx.dry_run:
-            ctx.console.dry_run("Would run: sm docker install")
+            ctx.console.dry_run(f"Would run: sm docker install --mtu={docker_mtu}")
         else:
             from sm.commands.docker.install import run_install
-            run_install(ctx, mtu=1450, skip_mtu_fix=False)
+            run_install(ctx, mtu=docker_mtu, skip_mtu_fix=False)
+            # Verify Docker is working
+            result = subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                ctx.console.success("Docker verified and running")
+            else:
+                ctx.console.warn("Docker installed but verification failed")
 
     # Security
     if security:
@@ -109,6 +133,16 @@ def run_setup(
                 collect_logs=True,
                 enable_cloud_detection=True,
             )
+            # Verify OTEL collector is running
+            result = subprocess.run(
+                ["systemctl", "is-active", "otel-host-metrics"],
+                capture_output=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                ctx.console.success("OTEL collector verified and running")
+            else:
+                ctx.console.warn("OTEL collector installed but may need time to start")
 
     # PostgreSQL
     if postgres:
@@ -129,6 +163,16 @@ def run_setup(
                 backup_config=None,
                 skip_backup=True,
             )
+            # Verify PostgreSQL is accepting connections
+            result = subprocess.run(
+                ["pg_isready", "-h", "127.0.0.1", "-p", "5432"],
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                ctx.console.success("PostgreSQL verified and accepting connections")
+            else:
+                ctx.console.warn("PostgreSQL installed but may need time to start")
 
     ctx.console.print()
     ctx.console.success("Server setup complete!")

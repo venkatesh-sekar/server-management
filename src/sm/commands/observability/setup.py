@@ -9,6 +9,7 @@ This module implements the `sm observability setup` command which:
 
 import os
 import platform
+import shutil
 import subprocess
 import urllib.request
 from pathlib import Path
@@ -136,7 +137,16 @@ class ObservabilitySetup:
             return
 
         # Create install directory
+        dir_existed = self.install_dir.exists()
         self.install_dir.mkdir(parents=True, exist_ok=True)
+
+        # Add rollback to remove install directory if we created it
+        if not dir_existed:
+            install_dir_str = str(self.install_dir)
+            self.rollback.push(
+                lambda: shutil.rmtree(install_dir_str, ignore_errors=True),
+                f"Remove install directory {self.install_dir}",
+            )
 
         # Check if binary already exists
         if otelcol_binary.exists():
@@ -245,6 +255,13 @@ class ObservabilitySetup:
         service_path.write_text(content)
         self.ctx.console.info(f"Created {service_path}")
 
+        # Add rollback to remove service file
+        service_path_str = str(service_path)
+        self.rollback.push(
+            lambda: Path(service_path_str).unlink(missing_ok=True),
+            f"Remove service file {service_path}",
+        )
+
         # Reload systemd
         subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
 
@@ -322,3 +339,13 @@ def run_observability_setup(
             ctx.console.warn("Rolling back changes...")
             setup.rollback.rollback_all()
         raise
+    except Exception as e:
+        # Also rollback on unexpected errors
+        if setup.rollback.has_items():
+            ctx.console.warn("Unexpected error, rolling back changes...")
+            setup.rollback.rollback_all()
+        raise SMError(
+            message="Observability setup failed",
+            details=[str(e)],
+            hint="Check the error message and try again",
+        ) from e

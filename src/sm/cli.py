@@ -813,6 +813,13 @@ def setup_cmd(
             help="Set server hostname",
         ),
     ] = None,
+    mtu: Annotated[
+        Optional[int],
+        typer.Option(
+            "--mtu",
+            help="Docker MTU value (default 1450 for Hetzner, 1500 for AWS/GCP)",
+        ),
+    ] = None,
     dry_run: DryRunOption = False,
     yes: YesOption = False,
     verbose: VerboseOption = 0,
@@ -880,6 +887,7 @@ def setup_cmd(
             postgres=postgres,
             otlp_endpoint=otlp_endpoint,
             hostname=hostname,
+            mtu=mtu,
         )
     except SMError as e:
         handle_error(e)
