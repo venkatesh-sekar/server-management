@@ -533,13 +533,13 @@ def postgres_setup_command(
     verbose: int = 0,
 ) -> None:
     """PostgreSQL setup implementation."""
-    ctx = create_context(dry_run=dry_run, force=force, yes=yes, verbosity=verbose)
+    ctx = create_context(dry_run=dry_run, force=force, yes=yes, verbose=verbose)
 
     # Default configs
     if pgbouncer_config is None:
         pgbouncer_config = {"port": 6432, "pool_mode": "transaction"}
 
     # Run preflight checks
-    run_preflight_checks(ctx)
+    run_preflight_checks(dry_run=ctx.dry_run, verbose=ctx.is_verbose)
 
     run_setup(ctx, version, pgbouncer_config, backup_config, skip_backup)

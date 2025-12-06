@@ -91,7 +91,7 @@ def create_database(
 
         sm postgres db create -d myapp -o existing_user
     """
-    ctx = create_context(dry_run=dry_run, force=force, yes=yes, verbosity=verbose)
+    ctx = create_context(dry_run=dry_run, force=force, yes=yes, verbose=verbose)
     audit = get_audit_logger()
 
     # Validate
@@ -104,7 +104,7 @@ def create_database(
         raise typer.Exit(3)
 
     # Run preflight checks
-    run_preflight_checks(ctx)
+    run_preflight_checks(dry_run=ctx.dry_run, verbose=ctx.is_verbose)
 
     # Get services
     executor, pg, pgb = _get_services(ctx)
@@ -213,7 +213,7 @@ def create_database_with_user(
 
         sm postgres db create-with-user -d myapp --dry-run
     """
-    ctx = create_context(dry_run=dry_run, force=force, yes=yes, verbosity=verbose)
+    ctx = create_context(dry_run=dry_run, force=force, yes=yes, verbose=verbose)
     audit = get_audit_logger()
     creds = get_credential_manager()
 
@@ -230,7 +230,7 @@ def create_database_with_user(
         raise typer.Exit(3)
 
     # Run preflight checks
-    run_preflight_checks(ctx)
+    run_preflight_checks(dry_run=ctx.dry_run, verbose=ctx.is_verbose)
 
     # Get services
     executor, pg, pgb = _get_services(ctx)
@@ -334,7 +334,7 @@ def list_databases(
 
         sm postgres db list
     """
-    ctx = create_context(verbosity=verbose)
+    ctx = create_context(verbose=verbose)
 
     # Get services
     executor, pg, _ = _get_services(ctx)
@@ -396,7 +396,7 @@ def grant_access(
 
         sm postgres db grant -d myapp -u writer --access readwrite
     """
-    ctx = create_context(dry_run=dry_run, yes=yes, verbosity=verbose)
+    ctx = create_context(dry_run=dry_run, yes=yes, verbose=verbose)
     audit = get_audit_logger()
 
     # Validate
@@ -408,7 +408,7 @@ def grant_access(
         raise typer.Exit(3)
 
     # Run preflight checks
-    run_preflight_checks(ctx)
+    run_preflight_checks(dry_run=ctx.dry_run, verbose=ctx.is_verbose)
 
     # Get services
     executor, pg, _ = _get_services(ctx)
@@ -503,7 +503,7 @@ def create_readonly_user(
 
         sm postgres db create-readonly-user -d myapp -u analytics
     """
-    ctx = create_context(dry_run=dry_run, yes=yes, verbosity=verbose)
+    ctx = create_context(dry_run=dry_run, yes=yes, verbose=verbose)
     audit = get_audit_logger()
     creds = get_credential_manager()
 
@@ -520,7 +520,7 @@ def create_readonly_user(
         raise typer.Exit(3)
 
     # Run preflight checks
-    run_preflight_checks(ctx)
+    run_preflight_checks(dry_run=ctx.dry_run, verbose=ctx.is_verbose)
 
     # Get services
     executor, pg, pgb = _get_services(ctx)
@@ -646,7 +646,7 @@ def create_readonly_user(
 
 @app.command("drop")
 @require_root
-@require_force(DangerLevel.CRITICAL)
+@require_force("Dropping databases permanently deletes all data")
 def drop_database(
     name: str = typer.Option(
         ..., "--database", "-d",
@@ -676,7 +676,7 @@ def drop_database(
         dry_run=dry_run,
         force=force,
         yes=yes,
-        verbosity=verbose,
+        verbose=verbose,
         confirm_name=confirm_name,
     )
     audit = get_audit_logger()
@@ -696,14 +696,14 @@ def drop_database(
 
     # Check protected database
     try:
-        check_not_protected_database(name, ctx)
+        check_not_protected_database(name)
     except Exception as e:
         console.error(str(e))
         audit.log_blocked("drop_database", str(e), "database", name)
         raise typer.Exit(4)
 
     # Run preflight checks
-    run_preflight_checks(ctx)
+    run_preflight_checks(dry_run=ctx.dry_run, verbose=ctx.is_verbose)
 
     # Get services
     executor, pg, pgb = _get_services(ctx)

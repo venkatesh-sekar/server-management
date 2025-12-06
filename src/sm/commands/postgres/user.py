@@ -99,7 +99,7 @@ def create_user(
 
         sm postgres user create -u service -d myapp --skip-pgbouncer
     """
-    ctx = create_context(dry_run=dry_run, force=force, yes=yes, verbosity=verbose)
+    ctx = create_context(dry_run=dry_run, force=force, yes=yes, verbose=verbose)
     audit = get_audit_logger()
     creds = get_credential_manager()
 
@@ -116,7 +116,7 @@ def create_user(
         raise typer.Exit(4)
 
     # Run preflight checks
-    run_preflight_checks(ctx)
+    run_preflight_checks(dry_run=ctx.dry_run, verbose=ctx.is_verbose)
 
     # Get services
     executor, pg, pgb = _get_services(ctx)
@@ -215,7 +215,7 @@ def list_users(
 
         sm postgres user list
     """
-    ctx = create_context(verbosity=verbose)
+    ctx = create_context(verbose=verbose)
 
     # Get services
     executor, pg, _ = _get_services(ctx)
@@ -280,7 +280,7 @@ def rotate_password(
 
         sm postgres user rotate-password -u myapp_user -d myapp
     """
-    ctx = create_context(dry_run=dry_run, force=force, yes=yes, verbosity=verbose)
+    ctx = create_context(dry_run=dry_run, force=force, yes=yes, verbose=verbose)
     audit = get_audit_logger()
     creds = get_credential_manager()
 
@@ -292,7 +292,7 @@ def rotate_password(
         raise typer.Exit(3)
 
     # Run preflight checks
-    run_preflight_checks(ctx)
+    run_preflight_checks(dry_run=ctx.dry_run, verbose=ctx.is_verbose)
 
     # Get services
     executor, pg, pgb = _get_services(ctx)
@@ -357,7 +357,7 @@ def rotate_password(
 
 @app.command("delete")
 @require_root
-@require_force(DangerLevel.DANGEROUS)
+@require_force("Deleting users is a dangerous operation")
 def delete_user(
     username: str = typer.Option(
         ..., "--user", "-u",
@@ -391,7 +391,7 @@ def delete_user(
         dry_run=dry_run,
         force=force,
         yes=yes,
-        verbosity=verbose,
+        verbose=verbose,
         confirm_name=confirm_name,
     )
     audit = get_audit_logger()
@@ -406,14 +406,14 @@ def delete_user(
 
     # Check protected user
     try:
-        check_not_protected_user(username, ctx)
+        check_not_protected_user(username)
     except Exception as e:
         console.error(str(e))
         audit.log_blocked("delete_user", str(e), "user", username)
         raise typer.Exit(4)
 
     # Run preflight checks
-    run_preflight_checks(ctx)
+    run_preflight_checks(dry_run=ctx.dry_run, verbose=ctx.is_verbose)
 
     # Get services
     executor, pg, pgb = _get_services(ctx)
