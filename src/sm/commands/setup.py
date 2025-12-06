@@ -80,7 +80,6 @@ def run_setup(
             if ctx.dry_run:
                 ctx.console.dry_run(f"Would run: hostnamectl set-hostname {hostname}")
             else:
-                import subprocess
                 result = subprocess.run(
                     ["hostnamectl", "set-hostname", hostname],
                     capture_output=True,
