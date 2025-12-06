@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from sm.core.context import ExecutionContext
 from sm.core.exceptions import ExecutionError, ValidationError
+from sm.core.audit import get_audit_logger, AuditEventType
 
 
 @dataclass
@@ -439,6 +440,7 @@ def run_recreate_network(
         network_name: Name of the network to recreate
         force_recreate: If True, skip confirmation
     """
+    audit = get_audit_logger()
     manager = NetworkMTUManager(ctx)
 
     ctx.console.print()
@@ -512,26 +514,45 @@ def run_recreate_network(
             ctx.console.warn("Operation cancelled")
             return
 
-    # Recreate network
-    manager.recreate_network(network_name, config, ctx.dry_run)
+    try:
+        # Recreate network
+        manager.recreate_network(network_name, config, ctx.dry_run)
 
-    if not ctx.dry_run:
-        # Verify new MTU
-        ctx.console.step("Verifying new network")
-        new_info = manager.get_network_info(network_name)
-        if new_info.mtu == mtu_value:
-            ctx.console.success(f"Network recreated with MTU {new_info.mtu}")
-        else:
-            ctx.console.warn(
-                f"Network recreated but MTU is {new_info.mtu} (expected {mtu_value})"
-            )
+        if not ctx.dry_run:
+            # Verify new MTU
+            ctx.console.step("Verifying new network")
+            new_info = manager.get_network_info(network_name)
+            if new_info.mtu == mtu_value:
+                ctx.console.success(f"Network recreated with MTU {new_info.mtu}")
+            else:
+                ctx.console.warn(
+                    f"Network recreated but MTU is {new_info.mtu} (expected {mtu_value})"
+                )
 
-        if containers:
-            ctx.console.print()
-            ctx.console.hint(
-                "Restart your containers to reconnect them to the network"
-            )
-            for container in containers:
-                ctx.console.print(f"  docker start {container['name']}")
+            if containers:
+                ctx.console.print()
+                ctx.console.hint(
+                    "Restart your containers to reconnect them to the network"
+                )
+                for container in containers:
+                    ctx.console.print(f"  docker start {container['name']}")
 
-    ctx.console.print()
+        ctx.console.print()
+
+        # Audit log success
+        audit.log_success(
+            AuditEventType.CONFIG_MODIFY,
+            "docker",
+            f"network/{network_name}",
+            message=f"Docker network {network_name} recreated with MTU {mtu_value}",
+        )
+
+    except Exception as e:
+        # Audit log failure
+        audit.log_failure(
+            AuditEventType.CONFIG_MODIFY,
+            "docker",
+            f"network/{network_name}",
+            error=str(e),
+        )
+        raise

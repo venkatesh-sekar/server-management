@@ -14,6 +14,7 @@ from typing import Any, Dict
 from sm.core.context import ExecutionContext
 from sm.core.executor import CommandExecutor, RollbackStack
 from sm.core.exceptions import ExecutionError, ValidationError
+from sm.core.audit import get_audit_logger, AuditEventType
 from sm.services.systemd import SystemdService
 
 
@@ -24,6 +25,34 @@ class DockerMTUFixer:
         self.ctx = ctx
         self.rollback = RollbackStack()
         self.daemon_json_path = Path("/etc/docker/daemon.json")
+
+    def is_mtu_configured(self, mtu: int) -> bool:
+        """Check if MTU is already configured correctly.
+
+        Args:
+            mtu: Expected MTU value
+
+        Returns:
+            True if MTU is already configured to the expected value
+        """
+        if not self.daemon_json_path.exists():
+            return False
+
+        try:
+            content = self.daemon_json_path.read_text()
+            config = json.loads(content) if content.strip() else {}
+
+            # Check for MTU configuration
+            mtu_str = (
+                config.get("default-network-opts", {})
+                .get("overlay", {})
+                .get("com.docker.network.driver.mtu")
+            )
+
+            return mtu_str == str(mtu)
+
+        except (json.JSONDecodeError, ValueError):
+            return False
 
     def check_docker_installed(self) -> None:
         """Check if Docker is installed."""
@@ -193,6 +222,8 @@ def run_fix_mtu(ctx: ExecutionContext, mtu: int = 1450) -> None:
         ctx: Execution context
         mtu: MTU value to configure (default: 1450)
     """
+    audit = get_audit_logger()
+
     # Validate MTU value
     if mtu < 68 or mtu > 65535:
         raise ValidationError(
@@ -201,6 +232,18 @@ def run_fix_mtu(ctx: ExecutionContext, mtu: int = 1450) -> None:
         )
 
     fixer = DockerMTUFixer(ctx)
+
+    # Check if already configured correctly (idempotency)
+    if not ctx.dry_run and fixer.is_mtu_configured(mtu):
+        ctx.console.info(f"Docker MTU already configured to {mtu}")
+        ctx.console.success("No changes needed")
+        audit.log_success(
+            AuditEventType.CONFIG_MODIFY,
+            "docker",
+            "mtu",
+            message=f"Docker MTU already configured to {mtu} (no changes)",
+        )
+        return
 
     try:
         # Check Docker is installed
@@ -235,7 +278,22 @@ def run_fix_mtu(ctx: ExecutionContext, mtu: int = 1450) -> None:
                 f"Backup saved: {fixer.daemon_json_path.with_suffix('.json.bak')}"
             )
 
-    except Exception:
+        # Audit log success
+        audit.log_success(
+            AuditEventType.CONFIG_MODIFY,
+            "docker",
+            "mtu",
+            message=f"Docker MTU configured to {mtu}",
+        )
+
+    except Exception as e:
+        # Audit log failure
+        audit.log_failure(
+            AuditEventType.CONFIG_MODIFY,
+            "docker",
+            "mtu",
+            error=str(e),
+        )
         # Rollback on error
         if fixer.rollback.has_items():
             ctx.console.warn("Rolling back changes...")

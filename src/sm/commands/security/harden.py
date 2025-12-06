@@ -16,8 +16,9 @@ from jinja2 import Environment, PackageLoader, select_autoescape
 
 from sm.core.context import ExecutionContext
 from sm.core.output import console
-from sm.core.executor import RollbackStack
+from sm.core.executor import RollbackStack, CommandExecutor
 from sm.core.exceptions import SMError, ExecutionError
+from sm.core.audit import get_audit_logger, AuditEventType
 from sm.services.systemd import SystemdService
 
 # Jinja2 environment for templates
@@ -29,12 +30,29 @@ jinja_env = Environment(
 )
 
 
+def _config_matches(path: Path, expected: str) -> bool:
+    """Check if config file already has expected content.
+
+    Args:
+        path: Path to the config file
+        expected: Expected content
+
+    Returns:
+        True if file exists and content matches (ignoring trailing whitespace)
+    """
+    if not path.exists():
+        return False
+    return path.read_text().strip() == expected.strip()
+
+
 class SecurityHarden:
     """Handles security hardening operations."""
 
     def __init__(self, ctx: ExecutionContext):
         self.ctx = ctx
         self.rollback = RollbackStack()
+        self.executor = CommandExecutor(ctx)
+        self.systemd = SystemdService(ctx, self.executor)
 
     def install_packages(self) -> None:
         """Install security packages via apt."""
@@ -110,7 +128,15 @@ class SecurityHarden:
             self.ctx.console.code(content, language="ini", title="jail.local")
             return
 
-        # Check if already exists
+        # Check if config already matches - skip if already in desired state
+        if _config_matches(jail_local, content):
+            self.ctx.console.info(f"{jail_local} already configured correctly")
+            # Still ensure service is enabled and running
+            self.systemd.enable("fail2ban")
+            self.ctx.console.success("fail2ban already configured and running")
+            return
+
+        # Check if already exists and backup
         if jail_local.exists():
             self.ctx.console.warn(f"{jail_local} already exists, backing up")
             backup_path = jail_local.with_suffix(".local.bak")
@@ -127,9 +153,8 @@ class SecurityHarden:
         self.ctx.console.info(f"Created {jail_local}")
 
         # Enable and restart fail2ban
-        fail2ban = SystemdService("fail2ban", self.ctx)
-        fail2ban.enable()
-        fail2ban.restart()
+        self.systemd.enable("fail2ban")
+        self.systemd.restart("fail2ban")
 
         self.ctx.console.success("fail2ban configured and running")
 
@@ -149,10 +174,18 @@ class SecurityHarden:
             self.ctx.console.code(content, language="bash", title="hardening.rules")
             return
 
+        # Check if config already matches - skip if already in desired state
+        if _config_matches(rules_file, content):
+            self.ctx.console.info(f"{rules_file} already configured correctly")
+            # Still ensure service is enabled
+            self.systemd.enable("auditd")
+            self.ctx.console.success("auditd already configured with baseline rules")
+            return
+
         # Create directory if needed
         rules_dir.mkdir(parents=True, exist_ok=True)
 
-        # Check if already exists
+        # Check if already exists and backup
         if rules_file.exists():
             self.ctx.console.warn(f"{rules_file} already exists, backing up")
             backup_path = rules_file.with_suffix(".rules.bak")
@@ -168,8 +201,7 @@ class SecurityHarden:
         self.ctx.console.info(f"Created {rules_file}")
 
         # Enable auditd
-        auditd = SystemdService("auditd", self.ctx)
-        auditd.enable()
+        self.systemd.enable("auditd")
 
         # Restart auditd (may fail if in immutable mode, which is OK)
         try:
@@ -220,6 +252,23 @@ class SecurityHarden:
             self.ctx.console.code(content, language="text", title="20auto-upgrades")
             return
 
+        # Check if config already matches - skip if already in desired state
+        if _config_matches(config_file, content):
+            self.ctx.console.info(f"{config_file} already configured correctly")
+            self.ctx.console.success("unattended-upgrades already configured")
+            return
+
+        # Backup if exists
+        if config_file.exists():
+            self.ctx.console.warn(f"{config_file} already exists, backing up")
+            backup_path = config_file.with_suffix(".bak")
+            import shutil
+            shutil.copy2(config_file, backup_path)
+            self.rollback.push(
+                lambda: shutil.move(str(backup_path), str(config_file)),
+                f"Restore {config_file} from backup",
+            )
+
         # Write config
         config_file.write_text(content)
         self.ctx.console.info(f"Updated {config_file}")
@@ -258,6 +307,16 @@ def run_harden(
         skip_upgrades: Skip unattended-upgrades configuration
     """
     hardener = SecurityHarden(ctx)
+    audit = get_audit_logger()
+
+    # Build list of components being configured
+    configured_components = []
+    if not skip_fail2ban:
+        configured_components.append("fail2ban")
+    if not skip_auditd:
+        configured_components.append("auditd")
+    if not skip_upgrades:
+        configured_components.append("unattended-upgrades")
 
     try:
         # Install packages (unless all components skipped)
@@ -294,7 +353,22 @@ def run_harden(
             for comp in components
         })
 
-    except SMError:
+        # Audit log success
+        audit.log_success(
+            AuditEventType.CONFIG_MODIFY,
+            "security",
+            "hardening",
+            message=f"Security hardening completed: {', '.join(configured_components)}",
+        )
+
+    except SMError as e:
+        # Audit log failure
+        audit.log_failure(
+            AuditEventType.CONFIG_MODIFY,
+            "security",
+            "hardening",
+            error=str(e),
+        )
         # Rollback on error
         if hardener.rollback.has_items():
             ctx.console.warn("Rolling back changes...")

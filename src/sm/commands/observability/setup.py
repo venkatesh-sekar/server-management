@@ -20,8 +20,9 @@ from jinja2 import Environment, PackageLoader, select_autoescape
 
 from sm.core.context import ExecutionContext
 from sm.core.output import console
-from sm.core.executor import RollbackStack
+from sm.core.executor import RollbackStack, CommandExecutor
 from sm.core.exceptions import SMError, ExecutionError, PrerequisiteError
+from sm.core.audit import get_audit_logger, AuditEventType
 from sm.services.systemd import SystemdService
 
 # Jinja2 environment for templates
@@ -62,6 +63,8 @@ class ObservabilitySetup:
         self.collect_logs = collect_logs
         self.enable_cloud_detection = enable_cloud_detection
         self.rollback = RollbackStack()
+        self.executor = CommandExecutor(ctx)
+        self.systemd = SystemdService(ctx, self.executor)
 
     def _get_download_url(self) -> str:
         """Get the download URL for OTEL collector based on architecture."""
@@ -262,13 +265,10 @@ class ObservabilitySetup:
             f"Remove service file {service_path}",
         )
 
-        # Reload systemd
-        subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
-
-        # Enable and start service
-        otel_service = SystemdService(self.service_name, self.ctx)
-        otel_service.enable()
-        otel_service.restart()
+        # Reload systemd and enable service
+        self.systemd.daemon_reload()
+        self.systemd.enable(self.service_name)
+        self.systemd.restart(self.service_name)
 
         self.ctx.console.success(f"Service {self.service_name} is running")
 
@@ -295,6 +295,8 @@ def run_observability_setup(
         collect_logs: Whether to collect logs (fail2ban, auth, audit)
         enable_cloud_detection: Enable cloud provider detection (GCP, EC2)
     """
+    audit = get_audit_logger()
+
     setup = ObservabilitySetup(
         ctx=ctx,
         otlp_endpoint=otlp_endpoint,
@@ -333,13 +335,35 @@ def run_observability_setup(
             "Collect logs": "Yes (fail2ban, auth, audit)" if collect_logs else "No",
         })
 
-    except SMError:
+        # Audit log success
+        audit.log_success(
+            AuditEventType.CONFIG_MODIFY,
+            "observability",
+            "otel-collector",
+            message=f"OpenTelemetry Collector v{otel_version} installed to {install_dir}",
+        )
+
+    except SMError as e:
+        # Audit log failure
+        audit.log_failure(
+            AuditEventType.CONFIG_MODIFY,
+            "observability",
+            "otel-collector",
+            error=str(e),
+        )
         # Rollback on error
         if setup.rollback.has_items():
             ctx.console.warn("Rolling back changes...")
             setup.rollback.rollback_all()
         raise
     except Exception as e:
+        # Audit log failure
+        audit.log_failure(
+            AuditEventType.CONFIG_MODIFY,
+            "observability",
+            "otel-collector",
+            error=str(e),
+        )
         # Also rollback on unexpected errors
         if setup.rollback.has_items():
             ctx.console.warn("Unexpected error, rolling back changes...")

@@ -530,6 +530,50 @@ def create_readonly_user(
         console.error(f"Database '{database}' does not exist")
         raise typer.Exit(1)
 
+    # Check if user already exists (idempotency)
+    user_exists = pg.user_exists(username)
+
+    if user_exists:
+        console.info(f"User '{username}' already exists")
+        console.info("Ensuring read-only grants are correct...")
+
+        try:
+            # Just ensure grants are correct
+            pg.grant_readonly(database, username)
+
+            # Update PgBouncer if needed
+            if not skip_pgbouncer and pgb.is_installed():
+                scram_hash = pg.get_scram_hash(username)
+                if scram_hash:
+                    pgb.update_userlist(username, scram_hash)
+                pgb.reload()
+
+            # Log success
+            audit.log_success(
+                AuditEventType.USER_GRANT,
+                "user",
+                username,
+                message=f"Read-only grants verified for {database} (user already exists)",
+            )
+
+            console.print()
+            console.summary(
+                "Read-Only Access Verified",
+                {
+                    "Database": database,
+                    "User": f"{username} (read-only)",
+                    "Status": "User exists, grants verified",
+                },
+                success=True,
+            )
+            return
+
+        except PostgresError as e:
+            audit.log_failure(AuditEventType.USER_GRANT, "user", username, str(e))
+            console.error(str(e))
+            raise typer.Exit(10)
+
+    # User doesn't exist - proceed with creation
     # Ensure password
     if password:
         final_password = password

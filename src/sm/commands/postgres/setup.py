@@ -37,6 +37,16 @@ from sm.services.systemd import SystemdService
 # Constants
 PGDG_KEY_URL = "https://www.postgresql.org/media/keys/ACCC4CF8.asc"
 PGDG_KEYRING = Path("/usr/share/keyrings/postgresql.gpg")
+PGDG_LIST = Path("/etc/apt/sources.list.d/pgdg.list")
+
+
+def _pgdg_repo_exists() -> bool:
+    """Check if PGDG repository is already configured.
+
+    Returns:
+        True if the PGDG repository list file exists
+    """
+    return PGDG_LIST.exists()
 
 
 def get_jinja_env() -> Environment:
@@ -100,31 +110,37 @@ def setup_postgres(
     console.step("Installing PostgreSQL from PGDG repository")
 
     if not ctx.dry_run:
-        # Get distro codename
-        result = executor.run(["lsb_release", "-cs"], description="Get distro codename")
-        codename = result.stdout.strip()
+        # Check if PGDG repository is already configured (idempotency)
+        if _pgdg_repo_exists():
+            console.info("PGDG repository already configured")
+        else:
+            # Get distro codename
+            result = executor.run(["lsb_release", "-cs"], description="Get distro codename")
+            codename = result.stdout.strip()
 
-        # Import PGDG key
-        console.step("Adding PGDG repository")
-        executor.run(
-            ["curl", "-fsSL", PGDG_KEY_URL, "-o", "/tmp/pgdg.asc"],
-            description="Download PGDG key",
-        )
-        executor.run(
-            ["gpg", "--dearmor", "-o", str(PGDG_KEYRING), "/tmp/pgdg.asc"],
-            description="Install PGDG keyring",
-        )
+            # Import PGDG key
+            console.step("Adding PGDG repository")
+            executor.run(
+                ["curl", "-fsSL", PGDG_KEY_URL, "-o", "/tmp/pgdg.asc"],
+                description="Download PGDG key",
+            )
+            executor.run(
+                ["gpg", "--dearmor", "-o", str(PGDG_KEYRING), "/tmp/pgdg.asc"],
+                description="Install PGDG keyring",
+            )
 
-        # Add repository
-        repo_line = f"deb [signed-by={PGDG_KEYRING}] http://apt.postgresql.org/pub/repos/apt {codename}-pgdg main"
-        executor.write_file(
-            Path("/etc/apt/sources.list.d/pgdg.list"),
-            repo_line + "\n",
-            description="Add PGDG repository",
-        )
+            # Add repository
+            repo_line = f"deb [signed-by={PGDG_KEYRING}] http://apt.postgresql.org/pub/repos/apt {codename}-pgdg main"
+            executor.write_file(
+                PGDG_LIST,
+                repo_line + "\n",
+                description="Add PGDG repository",
+            )
 
-        # Update and install
-        executor.run(["apt-get", "update", "-y"], description="Update package lists")
+            # Update after adding new repository
+            executor.run(["apt-get", "update", "-y"], description="Update package lists")
+
+        # Install packages (apt will skip if already installed)
         executor.apt_install(
             [f"postgresql-{version}", "pgbouncer", "pgbackrest"],
             description="Install PostgreSQL, PgBouncer, pgBackRest",
