@@ -1,69 +1,12 @@
 #cloud-config
-# ============================================================================
-# Minimal Cloud-Init for Server Setup
-# ============================================================================
-# Uses the SM CLI installer and commands - no duplicated logic.
-#
-# CONFIGURE THESE VARIABLES:
-# ============================================================================
-
-SM_BRANCH: "main"
-
-# Components to enable (true/false)
-ENABLE_DOCKER: true
-ENABLE_SECURITY: true
-ENABLE_OBSERVABILITY: false
-ENABLE_POSTGRES: false
-
-# Required if ENABLE_OBSERVABILITY=true
-OTLP_ENDPOINT: ""
-
-# Optional hostname override
-HOSTNAME: ""
-
-# ============================================================================
-# DO NOT EDIT BELOW THIS LINE
-# ============================================================================
+# Minimal cloud-init - just install SM CLI and run setup
+# Customize the sm setup flags below for your needs
 
 package_update: true
-package_upgrade: true
 
 packages:
   - curl
 
 runcmd:
-  # Install SM CLI (single source of truth)
-  - curl -fsSL https://raw.githubusercontent.com/venkatesh-sekar/server-management/${SM_BRANCH}/install.sh | bash -s -- --branch ${SM_BRANCH}
-
-  # Docker
-  - |
-    if [ "${ENABLE_DOCKER}" = "true" ]; then
-      sm docker install -y
-    fi
-
-  # Security hardening
-  - |
-    if [ "${ENABLE_SECURITY}" = "true" ]; then
-      sm security harden -y
-    fi
-
-  # Observability
-  - |
-    if [ "${ENABLE_OBSERVABILITY}" = "true" ] && [ -n "${OTLP_ENDPOINT}" ]; then
-      sm observability setup --otlp-endpoint="${OTLP_ENDPOINT}" -y
-    fi
-
-  # PostgreSQL
-  - |
-    if [ "${ENABLE_POSTGRES}" = "true" ]; then
-      sm postgres setup --skip-backup -y
-    fi
-
-  # Hostname
-  - |
-    if [ -n "${HOSTNAME}" ]; then
-      hostnamectl set-hostname "${HOSTNAME}"
-    fi
-
-final_message: |
-  Server setup complete. Run 'sm --help' for available commands.
+  - curl -fsSL https://raw.githubusercontent.com/venkatesh-sekar/server-management/main/install.sh | bash
+  - sm setup --docker --security -y

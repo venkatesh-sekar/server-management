@@ -761,6 +761,130 @@ def observability_setup_cmd(
         handle_error(e)
 
 
+# ============================================================================
+# Server setup command
+# ============================================================================
+
+@app.command("setup")
+def setup_cmd(
+    docker: Annotated[
+        bool,
+        typer.Option(
+            "--docker",
+            help="Install Docker with Hetzner MTU fix",
+            is_flag=True,
+        ),
+    ] = False,
+    security: Annotated[
+        bool,
+        typer.Option(
+            "--security",
+            help="Apply security hardening (fail2ban, auditd, upgrades)",
+            is_flag=True,
+        ),
+    ] = False,
+    observability: Annotated[
+        bool,
+        typer.Option(
+            "--observability",
+            help="Setup OpenTelemetry collector",
+            is_flag=True,
+        ),
+    ] = False,
+    postgres: Annotated[
+        bool,
+        typer.Option(
+            "--postgres",
+            help="Setup PostgreSQL 18",
+            is_flag=True,
+        ),
+    ] = False,
+    otlp_endpoint: Annotated[
+        Optional[str],
+        typer.Option(
+            "--otlp-endpoint",
+            help="OTLP endpoint (required with --observability)",
+        ),
+    ] = None,
+    hostname: Annotated[
+        Optional[str],
+        typer.Option(
+            "--hostname",
+            help="Set server hostname",
+        ),
+    ] = None,
+    dry_run: DryRunOption = False,
+    yes: YesOption = False,
+    verbose: VerboseOption = 0,
+    no_color: NoColorOption = False,
+) -> None:
+    """Setup server with selected components.
+
+    One command to configure your server with Docker, security hardening,
+    observability, and PostgreSQL.
+
+    [bold]Examples:[/bold]
+
+        # Docker + security (most common)
+        sudo sm setup --docker --security
+
+        # Full stack
+        sudo sm setup --docker --security --postgres
+
+        # With observability
+        sudo sm setup --docker --security --observability --otlp-endpoint=http://signoz:4318
+
+        # Preview changes
+        sm setup --docker --security --dry-run
+    """
+    from sm.commands.setup import run_setup
+
+    ctx = get_context(
+        dry_run=dry_run,
+        force=False,
+        yes=yes,
+        verbose=verbose,
+        no_color=no_color,
+    )
+
+    # Check root
+    import os
+    if os.geteuid() != 0 and not dry_run:
+        ctx.console.error("This operation requires root privileges")
+        ctx.console.hint("Run with: sudo sm setup ...")
+        raise typer.Exit(6)
+
+    if not yes and not dry_run:
+        components = []
+        if docker:
+            components.append("Docker")
+        if security:
+            components.append("Security")
+        if observability:
+            components.append("Observability")
+        if postgres:
+            components.append("PostgreSQL")
+
+        if components:
+            ctx.console.print(f"Components to install: {', '.join(components)}")
+            if not ctx.console.confirm("Proceed?"):
+                ctx.console.warn("Cancelled")
+                raise typer.Exit(0)
+
+    try:
+        run_setup(
+            ctx,
+            docker=docker,
+            security=security,
+            observability=observability,
+            postgres=postgres,
+            otlp_endpoint=otlp_endpoint,
+            hostname=hostname,
+        )
+    except SMError as e:
+        handle_error(e)
+
+
 # Entry point
 if __name__ == "__main__":
     app()
