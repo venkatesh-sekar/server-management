@@ -3,15 +3,38 @@
 Provides safe interface for managing PgBouncer configuration.
 """
 
+import configparser
 import re
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING
 
 from sm.core.context import ExecutionContext
-from sm.core.executor import CommandExecutor
-from sm.core.exceptions import PgBouncerError
 from sm.core.credentials import AtomicFileWriter
+from sm.core.exceptions import PgBouncerError
+from sm.core.executor import CommandExecutor
 from sm.services.systemd import SystemdService
+from sm.services.tuning import (
+    IDLE_TIMEOUT_SECONDS,
+    MULTIPLEX_RATIO,
+    POOL_UTILIZATION_PCT,
+    RESERVED_FOR_ADMIN,
+)
+
+if TYPE_CHECKING:
+    from sm.services.tuning import PgBouncerParameter, WorkloadProfile
+
+
+# PgBouncer tunable parameters we track
+PGBOUNCER_TUNABLE_PARAMETERS = [
+    "default_pool_size",
+    "min_pool_size",
+    "reserve_pool_size",
+    "max_client_conn",
+    "pool_mode",
+    "server_idle_timeout",
+    "server_connect_timeout",
+    "query_timeout",
+]
 
 
 # Default paths
@@ -36,8 +59,8 @@ class PgBouncerService:
         executor: CommandExecutor,
         systemd: SystemdService,
         *,
-        userlist_path: Optional[Path] = None,
-        ini_path: Optional[Path] = None,
+        userlist_path: Path | None = None,
+        ini_path: Path | None = None,
         pg_host: str = "127.0.0.1",
         pg_port: int = 5432,
     ) -> None:
@@ -59,7 +82,7 @@ class PgBouncerService:
         self.ini_path = ini_path or DEFAULT_INI_PATH
         self.pg_host = pg_host
         self.pg_port = pg_port
-        self._service_user: Optional[tuple[str, str]] = None
+        self._service_user: tuple[str, str] | None = None
 
     @property
     def service_user(self) -> tuple[str, str]:
@@ -190,8 +213,8 @@ class PgBouncerService:
         self,
         name: str,
         *,
-        host: Optional[str] = None,
-        port: Optional[int] = None,
+        host: str | None = None,
+        port: int | None = None,
         backup: bool = True,
     ) -> None:
         """Add or update a database mapping in pgbouncer.ini.
@@ -236,7 +259,7 @@ class PgBouncerService:
         updated = False
         section_found = False
 
-        for i, line in enumerate(lines):
+        for line in lines:
             if section_pattern.match(line):
                 in_databases_section = True
                 section_found = True
@@ -395,3 +418,269 @@ class PgBouncerService:
 
         with writer.open() as f:
             f.write(content)
+
+    def read_current_config(self) -> dict[str, str]:
+        """Read current PgBouncer settings from pgbouncer.ini.
+
+        Parses the [pgbouncer] section to get current pool settings.
+
+        Note: This is a read-only operation, so it runs even in dry-run mode.
+        This ensures the preview shows accurate current vs recommended comparisons.
+
+        Returns:
+            Dict of parameter name -> current value
+        """
+        if not self.ini_path.exists():
+            return {}
+
+        # Note: We intentionally DO NOT skip in dry_run mode.
+        # Reading current config is non-destructive and needed for accurate previews.
+
+        settings: dict[str, str] = {}
+        try:
+            content = self.ini_path.read_text()
+
+            # PgBouncer uses INI format but may have comments with semicolons
+            # Use configparser with inline_comment_prefixes
+            config = configparser.ConfigParser(
+                inline_comment_prefixes=(";", "#"),
+                comment_prefixes=(";", "#"),
+            )
+            config.read_string(content)
+
+            # Read from [pgbouncer] section
+            if config.has_section("pgbouncer"):
+                for param in PGBOUNCER_TUNABLE_PARAMETERS:
+                    if config.has_option("pgbouncer", param):
+                        settings[param] = config.get("pgbouncer", param)
+
+        except Exception:
+            # Fallback: simple line parsing
+            try:
+                in_pgbouncer_section = False
+                for line in content.splitlines():
+                    line = line.strip()
+                    if line.lower() == "[pgbouncer]":
+                        in_pgbouncer_section = True
+                        continue
+                    if line.startswith("[") and in_pgbouncer_section:
+                        break
+                    if in_pgbouncer_section and "=" in line:
+                        # Remove comments
+                        if ";" in line:
+                            line = line.split(";")[0].strip()
+                        if "#" in line:
+                            line = line.split("#")[0].strip()
+                        key, _, value = line.partition("=")
+                        key = key.strip().lower()
+                        value = value.strip()
+                        if key in PGBOUNCER_TUNABLE_PARAMETERS:
+                            settings[key] = value
+            except Exception:
+                pass
+
+        return settings
+
+    def calculate_pool_recommendations(
+        self,
+        pg_max_connections: int,
+        workload: "WorkloadProfile",
+        current_config: dict[str, str],
+        expected_connections: int | None = None,
+    ) -> list["PgBouncerParameter"]:
+        """Calculate PgBouncer tuning recommendations.
+
+        Coordinates PgBouncer settings with PostgreSQL max_connections to
+        eliminate connection bottlenecks.
+
+        Args:
+            pg_max_connections: PostgreSQL max_connections value
+            workload: Target workload profile
+            current_config: Current PgBouncer settings
+            expected_connections: Expected number of app connections
+
+        Returns:
+            List of PgBouncerParameter recommendations
+        """
+        from sm.services.tuning import PgBouncerParameter
+
+        params: list[PgBouncerParameter] = []
+
+        # Use shared constants from tuning module
+        available = pg_max_connections - RESERVED_FOR_ADMIN
+        pool_pct = POOL_UTILIZATION_PCT[workload.value]
+        default_pool_size = max(20, int(available * pool_pct))
+
+        params.append(PgBouncerParameter(
+            name="default_pool_size",
+            current_value=current_config.get("default_pool_size"),
+            recommended_value=str(default_pool_size),
+            reason=f"{int(pool_pct * 100)}% of PostgreSQL capacity ({available} available)",
+        ))
+
+        # min_pool_size: 25% of pool ready
+        min_pool_size = max(5, default_pool_size // 4)
+        params.append(PgBouncerParameter(
+            name="min_pool_size",
+            current_value=current_config.get("min_pool_size"),
+            recommended_value=str(min_pool_size),
+            reason="25% of pool kept ready for fast response",
+        ))
+
+        # reserve_pool_size: 20% emergency overflow
+        reserve_pool_size = max(5, default_pool_size // 5)
+        params.append(PgBouncerParameter(
+            name="reserve_pool_size",
+            current_value=current_config.get("reserve_pool_size"),
+            recommended_value=str(reserve_pool_size),
+            reason="20% emergency overflow for burst traffic",
+        ))
+
+        # max_client_conn: use shared multiplex ratio constants
+        multiplex = MULTIPLEX_RATIO[workload.value]
+        max_client_conn = default_pool_size * multiplex
+
+        # Adjust for expected connections
+        if expected_connections:
+            max_client_conn = max(max_client_conn, int(expected_connections * 1.5))
+
+        params.append(PgBouncerParameter(
+            name="max_client_conn",
+            current_value=current_config.get("max_client_conn"),
+            recommended_value=str(max_client_conn),
+            reason=f"{multiplex}x multiplex ratio for {workload.value.upper()}",
+        ))
+
+        # server_idle_timeout: use shared constants
+        idle_timeout = IDLE_TIMEOUT_SECONDS[workload.value]
+        params.append(PgBouncerParameter(
+            name="server_idle_timeout",
+            current_value=current_config.get("server_idle_timeout"),
+            recommended_value=str(idle_timeout),
+            reason="Connection recycling timeout",
+        ))
+
+        return params
+
+    def generate_optimized_config(
+        self,
+        recommendations: list["PgBouncerParameter"],
+        current_config: dict[str, str] | None = None,
+    ) -> str:
+        """Generate optimized pgbouncer.ini section content.
+
+        Updates only the pool-related settings in the [pgbouncer] section.
+        This is designed to be merged with existing config.
+
+        Args:
+            recommendations: List of PgBouncerParameter recommendations
+            current_config: Current config for reference
+
+        Returns:
+            Config section content as string
+        """
+        lines = [
+            "; Pool settings (optimized by sm postgres optimize)",
+        ]
+
+        for param in recommendations:
+            if param.changed:
+                lines.append(f"; Reason: {param.reason}")
+            lines.append(f"{param.name} = {param.recommended_value}")
+
+        return "\n".join(lines)
+
+    def apply_optimized_config(
+        self,
+        recommendations: list["PgBouncerParameter"],
+    ) -> None:
+        """Apply optimized PgBouncer configuration.
+
+        Updates pgbouncer.ini with new pool settings and reloads.
+
+        Args:
+            recommendations: List of PgBouncerParameter recommendations
+
+        Raises:
+            PgBouncerError: If update fails
+        """
+        if not self.ini_path.exists():
+            raise PgBouncerError(
+                f"PgBouncer config not found: {self.ini_path}",
+                hint="Run 'sm postgres setup' to install PgBouncer",
+            )
+
+        self.ctx.console.step("Updating PgBouncer configuration...")
+
+        if self.ctx.dry_run:
+            for param in recommendations:
+                if param.changed:
+                    self.ctx.console.dry_run_msg(
+                        f"Set {param.name} = {param.recommended_value}"
+                    )
+            return
+
+        # Read current content
+        current_content = self.ini_path.read_text()
+        lines = current_content.splitlines()
+
+        # Create mapping of recommendations
+        rec_map = {p.name: p.recommended_value for p in recommendations if p.changed}
+
+        # Update lines in [pgbouncer] section
+        new_lines = []
+        in_pgbouncer_section = False
+        params_updated = set()
+
+        for line in lines:
+            stripped = line.strip()
+
+            # Check for section headers
+            if stripped.lower() == "[pgbouncer]":
+                in_pgbouncer_section = True
+                new_lines.append(line)
+                continue
+            elif stripped.startswith("["):
+                # Leaving pgbouncer section - add any params we haven't updated yet
+                if in_pgbouncer_section:
+                    for param_name, value in rec_map.items():
+                        if param_name not in params_updated:
+                            new_lines.append(f"{param_name} = {value}")
+                            params_updated.add(param_name)
+                in_pgbouncer_section = False
+                new_lines.append(line)
+                continue
+
+            # Process lines in pgbouncer section
+            if in_pgbouncer_section and "=" in stripped:
+                # Extract key (handle comments)
+                key_part = stripped.split("=")[0].strip().lower()
+                if key_part in rec_map:
+                    new_lines.append(f"{key_part} = {rec_map[key_part]}")
+                    params_updated.add(key_part)
+                    continue
+
+            new_lines.append(line)
+
+        # If we're still in pgbouncer section at end of file, add remaining params
+        if in_pgbouncer_section:
+            for param_name, value in rec_map.items():
+                if param_name not in params_updated:
+                    new_lines.append(f"{param_name} = {value}")
+
+        # Write atomically
+        user, group = self.service_user
+        self._write_config_file(
+            self.ini_path,
+            "\n".join(new_lines) + "\n",
+            user,
+            group,
+            permissions=0o640,
+            backup=True,
+        )
+
+        self.ctx.console.success("PgBouncer configuration updated")
+
+        # Reload to apply changes
+        self.reload()
+        self.ctx.console.success("PgBouncer reloaded with new settings")

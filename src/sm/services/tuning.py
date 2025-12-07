@@ -50,6 +50,29 @@ class SystemInfo:
 _MEMORY_PATTERN = re.compile(r"^(\d+)\s*(kb|mb|gb|tb)?$", re.IGNORECASE)
 
 
+# =============================================================================
+# Pool Sizing Constants (shared between PostgreSQL and PgBouncer tuning)
+# =============================================================================
+
+# Pool utilization: what percentage of PostgreSQL's available connections to use
+# OLTP: aggressive pooling (80%) - short transactions, high throughput
+# OLAP: conservative (60%) - long queries, fewer connections needed
+# MIXED: balanced (70%)
+POOL_UTILIZATION_PCT = {"oltp": 0.80, "olap": 0.60, "mixed": 0.70}
+
+# Multiplex ratio: how many client connections per server connection
+# OLTP: high multiplexing (20x) - many short transactions share connections
+# OLAP: low multiplexing (5x) - long queries hold connections
+# MIXED: moderate (10x)
+MULTIPLEX_RATIO = {"oltp": 20, "olap": 5, "mixed": 10}
+
+# Server idle timeout (seconds): how long before recycling idle connections
+IDLE_TIMEOUT_SECONDS = {"oltp": 300, "olap": 600, "mixed": 300}
+
+# Reserved connections for admin/superuser access
+RESERVED_FOR_ADMIN = 5
+
+
 @dataclass
 class TuningParameter:
     """A single tuning parameter with metadata."""
@@ -100,6 +123,74 @@ class TuningParameter:
                 return str(num)
 
         return value
+
+
+@dataclass
+class PgBouncerParameter:
+    """A single PgBouncer tuning parameter with metadata."""
+
+    name: str
+    current_value: str | None
+    recommended_value: str
+    reason: str
+    requires_reload: bool = True  # PgBouncer uses SIGHUP reload
+    changed: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        """Determine if value has changed."""
+        if self.current_value is None:
+            self.changed = True
+        else:
+            self.changed = str(self.current_value).strip() != str(self.recommended_value).strip()
+
+
+@dataclass
+class ConnectionStackRecommendation:
+    """Unified recommendation for PostgreSQL + PgBouncer connection stack."""
+
+    # PostgreSQL settings
+    pg_max_connections: int
+    pg_superuser_reserved: int = 5
+
+    # PgBouncer settings
+    pgb_default_pool_size: int = 20
+    pgb_min_pool_size: int = 5
+    pgb_reserve_pool_size: int = 5
+    pgb_max_client_conn: int = 1000
+    pgb_pool_mode: str = "transaction"
+    pgb_server_idle_timeout: int = 300
+
+    # Context
+    expected_connections: int | None = None
+    workload: str = "mixed"
+
+    @property
+    def effective_pg_connections(self) -> int:
+        """Connections available for PgBouncer."""
+        return self.pg_max_connections - self.pg_superuser_reserved
+
+    @property
+    def multiplex_ratio(self) -> float:
+        """Client to server connection ratio."""
+        if self.pgb_default_pool_size == 0:
+            return 0.0
+        return self.pgb_max_client_conn / self.pgb_default_pool_size
+
+    @property
+    def utilization_ratio(self) -> float:
+        """How much of PostgreSQL capacity is used by pool."""
+        if self.effective_pg_connections == 0:
+            return 0.0
+        return self.pgb_default_pool_size / self.effective_pg_connections
+
+    @property
+    def contention_ratio(self) -> float:
+        """Expected connections to pool size ratio (lower is better)."""
+        if self.pgb_default_pool_size == 0:
+            return float("inf")
+        if self.expected_connections:
+            return self.expected_connections / self.pgb_default_pool_size
+        return self.pgb_max_client_conn / self.pgb_default_pool_size
 
 
 @dataclass
@@ -299,11 +390,116 @@ class PostgresTuningService:
 
         return None
 
+    def _calculate_max_connections(
+        self, memory_mb: int, workload: WorkloadProfile
+    ) -> int:
+        """Calculate optimal max_connections based on RAM and workload.
+
+        Formula:
+        - Reserve RAM for shared_buffers (workload-dependent %)
+        - Use 50% of remaining RAM for connection overhead
+        - Each connection uses ~5-15MB (work_mem, temp buffers, overhead)
+
+        Args:
+            memory_mb: Total system memory in MB
+            workload: Target workload profile
+
+        Returns:
+            Recommended max_connections value
+        """
+        # shared_buffers percentage by workload
+        shared_pct = {"oltp": 0.25, "olap": 0.40, "mixed": 0.30}[workload.value]
+
+        # Available RAM for connections (excluding shared_buffers, using 50% of remainder)
+        available_mb = memory_mb * (1 - shared_pct) * 0.5
+
+        # Per-connection memory overhead by workload
+        # OLTP: smaller work_mem, shorter transactions
+        # OLAP: larger work_mem, complex queries
+        per_conn_mb = {"oltp": 5, "olap": 15, "mixed": 8}[workload.value]
+
+        # Calculate based on available memory
+        calculated = int(available_mb / per_conn_mb)
+
+        # Apply workload-specific bounds
+        # OLTP: high concurrency needed (100-500)
+        # OLAP: fewer long-running queries (30-100)
+        # Mixed: balanced (50-300)
+        bounds = {
+            "oltp": (100, 500),
+            "olap": (30, 100),
+            "mixed": (50, 300),
+        }
+        min_conn, max_conn = bounds[workload.value]
+
+        return max(min_conn, min(calculated, max_conn))
+
+    def calculate_connection_stack(
+        self,
+        memory_mb: int,
+        workload: WorkloadProfile,
+        expected_connections: int | None = None,
+    ) -> ConnectionStackRecommendation:
+        """Calculate coordinated PostgreSQL + PgBouncer connection settings.
+
+        This ensures PgBouncer pool settings are properly sized relative to
+        PostgreSQL's max_connections, eliminating connection bottlenecks.
+
+        Args:
+            memory_mb: Total system memory in MB
+            workload: Target workload profile
+            expected_connections: Expected number of app connections
+
+        Returns:
+            ConnectionStackRecommendation with coordinated settings
+        """
+        # Calculate PostgreSQL max_connections
+        pg_max_conn = self._calculate_max_connections(memory_mb, workload)
+        available_for_pool = pg_max_conn - RESERVED_FOR_ADMIN
+
+        # Pool utilization: use shared constants
+        pool_pct = POOL_UTILIZATION_PCT[workload.value]
+        default_pool_size = max(20, int(available_for_pool * pool_pct))
+
+        # Multiplex ratio: use shared constants
+        multiplex = MULTIPLEX_RATIO[workload.value]
+        max_client_conn = default_pool_size * multiplex
+
+        # Adjust for expected connections if provided
+        if expected_connections:
+            # Ensure we can handle at least 1.5x expected connections
+            max_client_conn = max(max_client_conn, int(expected_connections * 1.5))
+
+        # min_pool_size: keep 25% of pool ready for quick response
+        min_pool_size = max(5, default_pool_size // 4)
+
+        # reserve_pool_size: 20% emergency overflow
+        reserve_pool_size = max(5, default_pool_size // 5)
+
+        # Server idle timeout: use shared constants
+        idle_timeout = IDLE_TIMEOUT_SECONDS[workload.value]
+
+        return ConnectionStackRecommendation(
+            pg_max_connections=pg_max_conn,
+            pg_superuser_reserved=RESERVED_FOR_ADMIN,
+            pgb_default_pool_size=default_pool_size,
+            pgb_min_pool_size=min_pool_size,
+            pgb_reserve_pool_size=reserve_pool_size,
+            pgb_max_client_conn=max_client_conn,
+            pgb_pool_mode="transaction",
+            pgb_server_idle_timeout=idle_timeout,
+            expected_connections=expected_connections,
+            workload=workload.value,
+        )
+
     def read_current_config(self, pg_version: str) -> dict[str, str]:
         """Read current PostgreSQL settings via a single pg_settings query.
 
         Uses a batched query to pg_settings instead of individual SHOW commands,
         reducing 18 database round-trips to 1.
+
+        Note: This is a read-only operation, so it runs even in dry-run mode.
+        This ensures the preview shows accurate current vs recommended comparisons.
 
         Args:
             pg_version: PostgreSQL version
@@ -311,8 +507,8 @@ class PostgresTuningService:
         Returns:
             Dict of parameter name -> current value
         """
-        if self.ctx.dry_run:
-            return {}
+        # Note: We intentionally DO NOT skip in dry_run mode.
+        # Reading current config is non-destructive and needed for accurate previews.
 
         settings = {}
         try:
@@ -398,9 +594,10 @@ class PostgresTuningService:
         ))
 
         # work_mem: workload-dependent per-operation memory
+        # OLAP needs more memory for complex sorts/hashes, even on small systems
         work_mem_values = {
             "oltp": 64,
-            "olap": min(memory // 32, 1024),  # Up to 1GB for OLAP
+            "olap": max(128, min(memory // 32, 1024)),  # At least 128MB, up to 1GB
             "mixed": 128,
         }
         work_mem = work_mem_values[workload.value]
@@ -506,14 +703,18 @@ class PostgresTuningService:
 
         # === Connection Settings ===
 
-        max_conn = {"oltp": 200, "olap": 50, "mixed": 100}[workload.value]
+        # Use adaptive calculation based on RAM instead of fixed values
+        max_conn = self._calculate_max_connections(memory, workload)
+        conn_reason = (
+            f"Adaptive: {memory}MB RAM, {workload.value.upper()} "
+            f"({max_conn} = optimal for {workload.description})"
+        )
         params.append(TuningParameter(
             name="max_connections",
             current_value=current_config.get("max_connections"),
             recommended_value=str(max_conn),
             unit="",
-            reason="High concurrency for OLTP" if workload == WorkloadProfile.OLTP
-            else f"Fewer connections for {workload.value.upper()}",
+            reason=conn_reason,
             requires_restart=True,
         ))
 

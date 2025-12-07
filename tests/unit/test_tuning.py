@@ -286,16 +286,23 @@ max_connections|100"""
         # Should have called run_sql more than once (fallback)
         assert mock_executor.run_sql.call_count > 1
 
-    def test_read_current_config_dry_run_returns_empty(self, mock_executor):
-        """Dry run should return empty dict without querying."""
+    def test_read_current_config_dry_run_still_reads(self, mock_executor):
+        """Dry run should still read config (it's non-destructive).
+
+        This ensures dry-run previews show accurate current vs recommended values.
+        """
         ctx = Mock()
         ctx.dry_run = True
+
+        mock_executor.run_sql.return_value = "shared_buffers|128MB\nwork_mem|4MB"
 
         service = PostgresTuningService(ctx, mock_executor)
         config = service.read_current_config("17")
 
-        assert config == {}
-        mock_executor.run_sql.assert_not_called()
+        # Should still read config in dry-run mode
+        assert config["shared_buffers"] == "128MB"
+        assert config["work_mem"] == "4MB"
+        mock_executor.run_sql.assert_called_once()
 
 
 class TestCalculateRecommendations:
@@ -382,20 +389,22 @@ class TestCalculateRecommendations:
         assert io_conc.recommended_value == "200"
 
     def test_oltp_max_connections(self, tuning_service, system_info):
-        """OLTP should use 200 max_connections."""
+        """OLTP should use adaptive max_connections (up to 500 for 16GB)."""
         rec = tuning_service.calculate_recommendations(
             system_info, WorkloadProfile.OLTP, {}
         )
         max_conn = next(p for p in rec.parameters if p.name == "max_connections")
-        assert max_conn.recommended_value == "200"
+        # Adaptive: (16384 * 0.75 * 0.5) / 5 = 1228, bounded to max 500
+        assert max_conn.recommended_value == "500"
 
     def test_olap_max_connections(self, tuning_service, system_info):
-        """OLAP should use 50 max_connections."""
+        """OLAP should use adaptive max_connections (up to 100 for 16GB)."""
         rec = tuning_service.calculate_recommendations(
             system_info, WorkloadProfile.OLAP, {}
         )
         max_conn = next(p for p in rec.parameters if p.name == "max_connections")
-        assert max_conn.recommended_value == "50"
+        # Adaptive: (16384 * 0.60 * 0.5) / 15 = 327, bounded to max 100
+        assert max_conn.recommended_value == "100"
 
     def test_olap_jit_enabled(self, tuning_service, system_info):
         """OLAP should enable JIT."""

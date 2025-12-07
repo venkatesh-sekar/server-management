@@ -138,6 +138,20 @@ def mock_executor() -> Generator[MagicMock, None, None]:
         yield instance
 
 
+@pytest.fixture
+def mock_pgb_service() -> Generator[MagicMock, None, None]:
+    """Mock PgBouncerService.
+
+    By default, returns is_installed=False so tests don't need to
+    handle PgBouncer unless explicitly testing it.
+    """
+    with patch("sm.commands.postgres.optimize.PgBouncerService") as mock:
+        instance = mock.return_value
+        instance.is_installed.return_value = False
+        instance.read_current_config.return_value = {}
+        yield instance
+
+
 class TestOptimizePreviewMode:
     """Tests for preview mode (default, no --apply)."""
 
@@ -148,6 +162,7 @@ class TestOptimizePreviewMode:
         mock_pg_service: MagicMock,
         mock_tuning_service: MagicMock,
         mock_executor: MagicMock,
+        mock_pgb_service: MagicMock,
     ) -> None:
         """Preview mode should show recommendations without applying."""
         result = runner.invoke(app, ["postgres", "optimize"])
@@ -166,6 +181,7 @@ class TestOptimizePreviewMode:
         mock_pg_service: MagicMock,
         mock_tuning_service: MagicMock,
         mock_executor: MagicMock,
+        mock_pgb_service: MagicMock,
     ) -> None:
         """Preview should show workload profile description."""
         result = runner.invoke(app, ["postgres", "optimize", "--workload", "oltp"])
@@ -187,6 +203,7 @@ class TestOptimizeWorkloadProfiles:
         mock_pg_service: MagicMock,
         mock_tuning_service: MagicMock,
         mock_executor: MagicMock,
+        mock_pgb_service: MagicMock,
     ) -> None:
         """All workload options should be accepted."""
         result = runner.invoke(app, ["postgres", "optimize", "-w", workload])
@@ -216,6 +233,7 @@ class TestOptimizeApplyMode:
         mock_executor: MagicMock,
         mock_systemd: MagicMock,
         mock_audit: MagicMock,
+        mock_pgb_service: MagicMock,
     ) -> None:
         """Apply mode without --yes should prompt for confirmation."""
         # Simulate user declining confirmation
@@ -232,6 +250,7 @@ class TestOptimizeApplyMode:
         mock_executor: MagicMock,
         mock_systemd: MagicMock,
         mock_audit: MagicMock,
+        mock_pgb_service: MagicMock,
     ) -> None:
         """Apply with --yes should skip confirmation and proceed."""
         # Also need to mock Path operations
@@ -271,6 +290,7 @@ class TestOptimizeDryRun:
         mock_pg_service: MagicMock,
         mock_tuning_service: MagicMock,
         mock_executor: MagicMock,
+        mock_pgb_service: MagicMock,
     ) -> None:
         """Dry-run should show preview."""
         result = runner.invoke(app, ["postgres", "optimize", "--dry-run"])
@@ -285,6 +305,7 @@ class TestOptimizeDryRun:
         mock_pg_service: MagicMock,
         mock_tuning_service: MagicMock,
         mock_executor: MagicMock,
+        mock_pgb_service: MagicMock,
     ) -> None:
         """Dry-run with apply should still not make changes."""
         result = runner.invoke(
@@ -304,6 +325,7 @@ class TestOptimizeEdgeCases:
         mock_root_check: None,
         mock_preflight: None,
         mock_executor: MagicMock,
+        mock_pgb_service: MagicMock,
     ) -> None:
         """Should fail gracefully if PostgreSQL not installed."""
         with patch("sm.commands.postgres.optimize.PostgreSQLService") as mock:
@@ -318,6 +340,7 @@ class TestOptimizeEdgeCases:
         mock_root_check: None,
         mock_preflight: None,
         mock_executor: MagicMock,
+        mock_pgb_service: MagicMock,
     ) -> None:
         """Should fail gracefully if PostgreSQL not running."""
         with patch("sm.commands.postgres.optimize.PostgreSQLService") as mock:
@@ -340,6 +363,7 @@ class TestOptimizeSafetyChecks:
         mock_pg_service: MagicMock,
         mock_systemd: MagicMock,
         mock_audit: MagicMock,
+        mock_pgb_service: MagicMock,
         sample_system_info: SystemInfo,
     ) -> None:
         """Should warn when active connections approach max_connections."""
@@ -390,6 +414,7 @@ class TestOptimizeOutput:
         mock_pg_service: MagicMock,
         mock_tuning_service: MagicMock,
         mock_executor: MagicMock,
+        mock_pgb_service: MagicMock,
     ) -> None:
         """Output should include detected system info."""
         result = runner.invoke(app, ["postgres", "optimize"])
@@ -405,6 +430,7 @@ class TestOptimizeOutput:
         mock_pg_service: MagicMock,
         mock_tuning_service: MagicMock,
         mock_executor: MagicMock,
+        mock_pgb_service: MagicMock,
     ) -> None:
         """Output should include parameter comparison table."""
         result = runner.invoke(app, ["postgres", "optimize"])
@@ -421,6 +447,7 @@ class TestOptimizeOutput:
         mock_pg_service: MagicMock,
         mock_tuning_service: MagicMock,
         mock_executor: MagicMock,
+        mock_pgb_service: MagicMock,
     ) -> None:
         """Preview mode should show hint to use --apply."""
         result = runner.invoke(app, ["postgres", "optimize"])
@@ -438,6 +465,7 @@ class TestOptimizeAlreadyOptimal:
         mock_preflight: None,
         mock_pg_service: MagicMock,
         mock_executor: MagicMock,
+        mock_pgb_service: MagicMock,
         sample_system_info: SystemInfo,
     ) -> None:
         """Should show 'already optimal' when no changes needed."""
@@ -474,6 +502,7 @@ class TestOptimizeAlreadyOptimal:
         mock_preflight: None,
         mock_pg_service: MagicMock,
         mock_executor: MagicMock,
+        mock_pgb_service: MagicMock,
         sample_system_info: SystemInfo,
     ) -> None:
         """Apply with already optimal config should not make changes."""
@@ -502,3 +531,188 @@ class TestOptimizeAlreadyOptimal:
 
         assert result.exit_code == 0
         assert "no changes" in result.output.lower()
+
+
+class TestOptimizeInputValidation:
+    """Tests for input validation."""
+
+    def test_negative_expected_connections_rejected(
+        self,
+        mock_root_check: None,
+        mock_preflight: None,
+    ) -> None:
+        """Negative expected connections should be rejected."""
+        result = runner.invoke(
+            app,
+            ["postgres", "optimize", "--expected-connections", "-5"],
+        )
+
+        assert result.exit_code == 1
+        assert "positive" in result.output.lower()
+
+    def test_zero_expected_connections_rejected(
+        self,
+        mock_root_check: None,
+        mock_preflight: None,
+    ) -> None:
+        """Zero expected connections should be rejected."""
+        result = runner.invoke(
+            app,
+            ["postgres", "optimize", "--expected-connections", "0"],
+        )
+
+        assert result.exit_code == 1
+        assert "positive" in result.output.lower()
+
+    def test_very_high_expected_connections_warns(
+        self,
+        mock_root_check: None,
+        mock_preflight: None,
+        mock_pg_service: MagicMock,
+        mock_tuning_service: MagicMock,
+        mock_executor: MagicMock,
+        mock_pgb_service: MagicMock,
+    ) -> None:
+        """Very high expected connections should show warning."""
+        # Decline the confirmation
+        result = runner.invoke(
+            app,
+            ["postgres", "optimize", "--expected-connections", "50000"],
+            input="n\n",  # Decline the "Continue anyway?" prompt
+        )
+
+        # Should exit 0 (user declined)
+        assert result.exit_code == 0
+        assert "very high" in result.output.lower() or "50000" in result.output
+
+
+class TestOptimizeConflictingConfigs:
+    """Tests for conflicting config file detection."""
+
+    def test_detects_conflicting_config_files(
+        self,
+        mock_root_check: None,
+        mock_preflight: None,
+        mock_pg_service: MagicMock,
+        mock_tuning_service: MagicMock,
+        mock_executor: MagicMock,
+        mock_pgb_service: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Should warn about conflicting tuning files."""
+        # Create a fake conf.d directory with conflicting files
+        conf_d = tmp_path / "conf.d"
+        conf_d.mkdir()
+        (conf_d / "50-custom-tuning.conf").write_text("# Custom tuning")
+
+        with patch(
+            "sm.commands.postgres.optimize._check_existing_tuning_files"
+        ) as mock_check:
+            mock_check.return_value = [conf_d / "50-custom-tuning.conf"]
+
+            result = runner.invoke(app, ["postgres", "optimize"])
+
+        assert result.exit_code == 0
+        assert "tuning" in result.output.lower() or "conflict" in result.output.lower()
+
+
+class TestOptimizeChangesSummary:
+    """Tests for the changes summary display."""
+
+    def test_summary_shows_restart_warning(
+        self,
+        mock_root_check: None,
+        mock_preflight: None,
+        mock_pg_service: MagicMock,
+        mock_executor: MagicMock,
+        mock_systemd: MagicMock,
+        mock_audit: MagicMock,
+        mock_pgb_service: MagicMock,
+        sample_system_info: SystemInfo,
+    ) -> None:
+        """Summary should show restart warning for restart-required changes."""
+        recommendation = TuningRecommendation(
+            system_info=sample_system_info,
+            workload_profile=WorkloadProfile.MIXED,
+            parameters=[
+                TuningParameter(
+                    name="shared_buffers",
+                    current_value="128MB",
+                    recommended_value="4096MB",
+                    unit="MB",
+                    reason="Test",
+                    requires_restart=True,
+                ),
+            ],
+        )
+
+        with patch("sm.commands.postgres.optimize.PostgresTuningService") as mock_tuning:
+            instance = mock_tuning.return_value
+            instance.detect_system_info.return_value = sample_system_info
+            instance.read_current_config.return_value = {"shared_buffers": "128MB"}
+            instance.calculate_recommendations.return_value = recommendation
+            instance.calculate_connection_stack.return_value = None
+
+            result = runner.invoke(
+                app,
+                ["postgres", "optimize", "--apply"],
+                input="n\n",  # Decline at confirmation
+            )
+
+        # Should show restart warning in output
+        assert "restart" in result.output.lower()
+
+
+class TestOptimizeDowntimeWarning:
+    """Tests for downtime warning display."""
+
+    def test_shows_downtime_warning_for_restart(
+        self,
+        mock_root_check: None,
+        mock_preflight: None,
+        mock_pg_service: MagicMock,
+        mock_executor: MagicMock,
+        mock_systemd: MagicMock,
+        mock_audit: MagicMock,
+        mock_pgb_service: MagicMock,
+        sample_system_info: SystemInfo,
+    ) -> None:
+        """Should show downtime warning when restart is required."""
+        recommendation = TuningRecommendation(
+            system_info=sample_system_info,
+            workload_profile=WorkloadProfile.MIXED,
+            parameters=[
+                TuningParameter(
+                    name="shared_buffers",
+                    current_value="128MB",
+                    recommended_value="4096MB",
+                    unit="MB",
+                    reason="Test",
+                    requires_restart=True,
+                ),
+            ],
+        )
+
+        with patch("sm.commands.postgres.optimize.PostgresTuningService") as mock_tuning:
+            instance = mock_tuning.return_value
+            instance.detect_system_info.return_value = sample_system_info
+            instance.read_current_config.return_value = {"shared_buffers": "128MB"}
+            instance.calculate_recommendations.return_value = recommendation
+            instance.calculate_connection_stack.return_value = None
+            instance.generate_config.return_value = "# test"
+
+            with patch("sm.commands.postgres.optimize.Path") as mock_path:
+                mock_conf_d = MagicMock()
+                mock_conf_d.exists.return_value = True
+                mock_config_path = MagicMock()
+                mock_config_path.parent = mock_conf_d
+                mock_config_path.exists.return_value = False
+                mock_path.return_value = mock_config_path
+
+                result = runner.invoke(
+                    app,
+                    ["postgres", "optimize", "--apply", "--yes"],
+                )
+
+        # Should show downtime warning
+        assert "downtime" in result.output.lower() or "connection" in result.output.lower()
