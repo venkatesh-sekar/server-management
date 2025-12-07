@@ -67,12 +67,18 @@ docker_app = typer.Typer(
 from sm.commands.postgres.user import app as postgres_user_app
 from sm.commands.postgres.db import app as postgres_db_app
 from sm.commands.postgres.optimize import app as postgres_optimize_app
+from sm.commands.postgres.backup import app as postgres_backup_app
+from sm.commands.postgres.restore import app as postgres_restore_app
+from sm.commands.postgres.migrate import app as postgres_migrate_app
 from sm.commands.docker import app as docker_commands_app
 
 # Register postgres sub-commands
 postgres_app.add_typer(postgres_user_app, name="user")
 postgres_app.add_typer(postgres_db_app, name="db")
 postgres_app.add_typer(postgres_optimize_app, name="optimize")
+postgres_app.add_typer(postgres_backup_app, name="backup")
+postgres_app.add_typer(postgres_restore_app, name="restore")
+postgres_app.add_typer(postgres_migrate_app, name="migrate")
 
 # Register command groups
 app.add_typer(postgres_app, name="postgres")

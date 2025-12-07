@@ -63,10 +63,22 @@ class AuditEventType(Enum):
     SECURITY_BLOCKED = "security.blocked"
     SECURITY_WARNING = "security.warning"
 
-    # Backup operations
+    # Backup operations (pgBackRest scheduled backups)
     BACKUP_CREATE = "backup.create"
     BACKUP_RESTORE = "backup.restore"
     BACKUP_VERIFY = "backup.verify"
+
+    # Export operations (pg_dump manual backups)
+    BACKUP_EXPORT = "backup.export"
+    BACKUP_EXPORT_DELETE = "backup.export_delete"
+
+    # Restore operations
+    RESTORE_FROM_EXPORT = "restore.from_export"
+    RESTORE_FROM_BACKUP = "restore.from_backup"
+
+    # Migration operations
+    MIGRATE_DATABASE = "migrate.database"
+    MIGRATE_CLUSTER = "migrate.cluster"
 
 
 class AuditResult(Enum):

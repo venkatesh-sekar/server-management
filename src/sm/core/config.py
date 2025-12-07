@@ -99,6 +99,40 @@ class BackupConfig(BaseModel):
         return v
 
 
+class ExportConfig(BaseModel):
+    """Configuration for pg_dump exports (separate from pgBackRest).
+
+    These exports use a separate S3 path to avoid conflicts with
+    pgBackRest continuous backups.
+    """
+
+    # S3 path prefix - MUST be different from pgBackRest repo_path
+    export_path: str = "/pg-exports"  # Results in s3://bucket/pg-exports/
+
+    # Compression level for pg_dump (0-9, 0=none)
+    compression_level: int = 6
+
+    # Encrypt exports using same passphrase as pgBackRest
+    encrypt: bool = True
+
+    @field_validator("export_path")
+    @classmethod
+    def validate_export_path(cls, v: str) -> str:
+        if not v.startswith("/"):
+            raise ValueError("export_path must start with /")
+        # CRITICAL: Must not conflict with pgBackRest path
+        if v.startswith("/pgbackrest"):
+            raise ValueError("export_path cannot use /pgbackrest (reserved for pgBackRest)")
+        return v
+
+    @field_validator("compression_level")
+    @classmethod
+    def validate_compression_level(cls, v: int) -> int:
+        if not 0 <= v <= 9:
+            raise ValueError("compression_level must be between 0 and 9")
+        return v
+
+
 class SecurityConfig(BaseModel):
     """Security hardening configuration."""
 
@@ -142,6 +176,7 @@ class MachineConfig(BaseModel):
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
     pgbouncer: PgBouncerConfig = Field(default_factory=PgBouncerConfig)
     backup: BackupConfig = Field(default_factory=BackupConfig)
+    export: ExportConfig = Field(default_factory=ExportConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
 
@@ -284,6 +319,11 @@ class AppConfig:
         return self._config.backup
 
     @property
+    def export(self) -> ExportConfig:
+        """Shortcut to export config."""
+        return self._config.export
+
+    @property
     def security(self) -> SecurityConfig:
         """Shortcut to security config."""
         return self._config.security
@@ -352,6 +392,13 @@ backup:
   retention_archive: 60  # days
   # Credentials from environment:
   #   SM_B2_KEY, SM_B2_SECRET, SM_BACKUP_PASSPHRASE
+
+# Export configuration (pg_dump to S3)
+# Uses separate path from pgBackRest to avoid conflicts
+export:
+  export_path: /pg-exports  # s3://bucket/pg-exports/
+  compression_level: 6  # 0-9
+  encrypt: true
 
 # Security hardening
 security:
