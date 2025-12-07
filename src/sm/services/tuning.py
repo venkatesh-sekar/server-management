@@ -505,31 +505,33 @@ class PostgresTuningService:
             pg_version: PostgreSQL version
 
         Returns:
-            Dict of parameter name -> current value
+            Dict of parameter name -> current value (converted to human-readable format)
         """
         # Note: We intentionally DO NOT skip in dry_run mode.
         # Reading current config is non-destructive and needed for accurate previews.
 
         settings = {}
         try:
-            # Build single query for all parameters
+            # Build single query for all parameters, including unit for proper conversion
             # Note: TUNABLE_PARAMETERS is a hardcoded constant, not user input
             params_list = "', '".join(self.TUNABLE_PARAMETERS)
             result = self.executor.run_sql(
-                f"SELECT name, setting FROM pg_settings WHERE name IN ('{params_list}')",  # noqa: S608
+                f"SELECT name, setting, unit FROM pg_settings WHERE name IN ('{params_list}')",  # noqa: S608
                 as_user="postgres",
                 check=False,
             )
             if result:
                 for line in result.strip().split("\n"):
-                    # Handle psql output format: "name|setting" or "name | setting"
+                    # Handle psql output format: "name|setting|unit"
                     if "|" in line:
-                        parts = line.split("|", 1)
-                        if len(parts) == 2:
+                        parts = line.split("|")
+                        if len(parts) >= 2:
                             name = parts[0].strip()
                             value = parts[1].strip()
+                            unit = parts[2].strip() if len(parts) > 2 else ""
                             if name in self.TUNABLE_PARAMETERS:
-                                settings[name] = value
+                                # Convert to human-readable format for comparison
+                                settings[name] = self._convert_pg_value(name, value, unit)
         except Exception:
             # Fallback to individual queries if batched query fails
             for param in self.TUNABLE_PARAMETERS:
@@ -545,6 +547,48 @@ class PostgresTuningService:
                     pass
 
         return settings
+
+    def _convert_pg_value(self, name: str, value: str, unit: str) -> str:
+        """Convert PostgreSQL raw setting value to human-readable format.
+
+        PostgreSQL stores memory values in various units (8kB pages, kB, etc.).
+        This converts them to the same format used in recommendations (e.g., "954MB").
+
+        Args:
+            name: Parameter name
+            value: Raw setting value from pg_settings
+            unit: Unit from pg_settings (e.g., "8kB", "kB", "MB", "ms", "s", "min")
+
+        Returns:
+            Human-readable value string
+        """
+        # Non-numeric values (like "on", "off") - return as-is
+        try:
+            num_value = int(value)
+        except ValueError:
+            return value
+
+        # Handle memory units - convert to MB for consistency with recommendations
+        if unit == "8kB":
+            # 8KB pages (shared_buffers, wal_buffers, effective_cache_size)
+            mb_value = (num_value * 8) // 1024
+            return f"{mb_value}MB"
+        elif unit == "kB":
+            # Kilobytes (work_mem, maintenance_work_mem)
+            mb_value = num_value // 1024
+            return f"{mb_value}MB"
+        elif unit == "MB":
+            # Already in MB (min_wal_size, max_wal_size)
+            return f"{num_value}MB"
+        elif unit == "GB":
+            # Gigabytes
+            return f"{num_value}GB"
+        elif unit in ("", None):
+            # No unit - return as-is (max_connections, worker counts, etc.)
+            return str(num_value)
+        else:
+            # Other units (time, etc.) - return with unit suffix
+            return f"{num_value}{unit}"
 
     def calculate_recommendations(
         self,
