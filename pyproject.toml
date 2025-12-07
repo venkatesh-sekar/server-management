@@ -79,6 +79,8 @@ ignore = [
     "S101",   # assert used (OK in tests)
     "S603",   # subprocess without shell (we handle this)
     "S607",   # partial path (we use full paths)
+    "B008",   # function call in defaults (required for Typer patterns)
+    "S110",   # try-except-pass (used in resource detection fallbacks)
 ]
 
 [tool.mypy]

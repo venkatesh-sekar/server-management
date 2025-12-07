@@ -32,6 +32,7 @@ from sm.core import (
 )
 from sm.core.validation import validate_cidr, validate_url, validate_path
 from sm.services.systemd import SystemdService
+from sm.services.tuning import PostgresTuningService, WorkloadProfile
 
 
 # Constants
@@ -57,39 +58,6 @@ def get_jinja_env() -> Environment:
         trim_blocks=True,
         lstrip_blocks=True,
     )
-
-
-def get_system_memory_mb() -> int:
-    """Get total system memory in MB."""
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if line.startswith("MemTotal:"):
-                    # Format: "MemTotal:     16384000 kB"
-                    parts = line.split()
-                    return int(parts[1]) // 1024
-    except (OSError, ValueError, IndexError):
-        pass
-    return 4096  # Default to 4GB
-
-
-def calculate_tuning_params(total_mb: int) -> dict:
-    """Calculate PostgreSQL tuning parameters based on RAM.
-
-    Args:
-        total_mb: Total system memory in MB
-
-    Returns:
-        Dict of tuning parameters
-    """
-    return {
-        "total_ram_mb": total_mb,
-        "shared_buffers_mb": total_mb // 4,  # 25%
-        "effective_cache_size_mb": total_mb * 3 // 4,  # 75%
-        "maintenance_work_mem_mb": min(total_mb // 8, 2048),  # 12.5%, max 2GB
-        "work_mem_mb": 32,
-        "max_connections": 100,
-    }
 
 
 def setup_postgres(
@@ -148,13 +116,25 @@ def setup_postgres(
     else:
         console.dry_run_msg(f"Install postgresql-{version}, pgbouncer, pgbackrest")
 
-    # Get tuning parameters
-    total_mb = get_system_memory_mb()
-    tuning = calculate_tuning_params(total_mb)
+    # Get tuning parameters using enhanced detection
+    console.step("Detecting system resources for tuning")
+    tuning_service = PostgresTuningService(ctx, executor)
+    system_info = tuning_service.detect_system_info(version)
 
-    console.info(f"Detected {total_mb}MB RAM, applying tuning:")
-    console.info(f"  shared_buffers = {tuning['shared_buffers_mb']}MB")
-    console.info(f"  effective_cache_size = {tuning['effective_cache_size_mb']}MB")
+    console.info(f"Detected: {system_info.memory_mb}MB RAM, "
+                 f"{system_info.cpu_count} CPUs, {system_info.disk_type.upper()}")
+
+    # Calculate recommendations using MIXED profile by default for new installs
+    recommendation = tuning_service.calculate_recommendations(
+        system_info,
+        WorkloadProfile.MIXED,
+        {},  # No current config during fresh setup
+    )
+
+    # Display key settings
+    console.info("Applying tuning (MIXED workload profile):")
+    for param in recommendation.parameters[:4]:  # Show first 4 params
+        console.info(f"  {param.name} = {param.recommended_value}")
 
     # Write tuning config
     pg_conf_dir = Path(f"/etc/postgresql/{version}/main")
@@ -163,7 +143,7 @@ def setup_postgres(
     if not ctx.dry_run:
         conf_d.mkdir(parents=True, exist_ok=True)
 
-    tuning_conf = jinja.get_template("postgresql/tuning.conf.j2").render(**tuning)
+    tuning_conf = tuning_service.generate_config(recommendation)
     executor.write_file(
         conf_d / "99-tuning.conf",
         tuning_conf,

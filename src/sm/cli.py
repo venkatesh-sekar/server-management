@@ -66,11 +66,13 @@ docker_app = typer.Typer(
 # Import sub-commands
 from sm.commands.postgres.user import app as postgres_user_app
 from sm.commands.postgres.db import app as postgres_db_app
+from sm.commands.postgres.optimize import app as postgres_optimize_app
 from sm.commands.docker import app as docker_commands_app
 
 # Register postgres sub-commands
 postgres_app.add_typer(postgres_user_app, name="user")
 postgres_app.add_typer(postgres_db_app, name="db")
+postgres_app.add_typer(postgres_optimize_app, name="optimize")
 
 # Register command groups
 app.add_typer(postgres_app, name="postgres")
