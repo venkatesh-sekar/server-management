@@ -356,6 +356,7 @@ def firewall_list(
         ctx.console.print("  [cyan]Proto[/cyan]    Protocol: tcp, udp, icmp, or all")
         ctx.console.print("  [cyan]Port[/cyan]     Port number (- means all ports)")
         ctx.console.print("  [cyan]Source[/cyan]   Who can connect: IP address or 0.0.0.0/0 (anyone)")
+        ctx.console.print("  [cyan]Match[/cyan]    Extra criteria: interface (lo), connection state, etc.")
         ctx.console.print("  [cyan]Action[/cyan]   [green]ACCEPT[/green] = allow, [red]DROP[/red] = block silently, [yellow]f2b-*[/yellow] = fail2ban check")
         ctx.console.print()
 
@@ -382,6 +383,7 @@ def firewall_list(
             table.add_column("Proto", style="cyan")
             table.add_column("Port", justify="right")
             table.add_column("Source")
+            table.add_column("Match", style="dim")  # Technical matching criteria
             table.add_column("Action", style="bold")
             table.add_column("Description", style="dim")
 
@@ -405,14 +407,18 @@ def firewall_list(
                 elif rule.source == "127.0.0.1" or rule.source == "127.0.0.0/8":
                     source_display = "localhost"
 
-                # Use action_description for chain jumps, otherwise use existing comment
-                description = rule.action_description or rule.comment or ""
+                # Human-readable description
+                description = rule.comment or rule.action_description or ""
+
+                # Technical matching criteria (interface, state, etc.)
+                match_criteria = rule.technical_details or ""
 
                 table.add_row(
                     str(rule.num),
                     rule.protocol,
                     port_str,
                     source_display,
+                    match_criteria,
                     f"[{action_color}]{rule.display_action}[/{action_color}]",
                     description,
                 )

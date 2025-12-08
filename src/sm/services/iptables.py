@@ -193,6 +193,7 @@ class ParsedRule:
     port: Optional[int] = None
     comment: Optional[str] = None
     extra: Optional[str] = None
+    in_interface: Optional[str] = None  # Input interface (e.g., "lo" for loopback)
 
     @property
     def is_chain_jump(self) -> bool:
@@ -219,6 +220,40 @@ class ParsedRule:
         if self.is_chain_jump:
             return f"Jump to {self.target} chain"
         return ""
+
+    @property
+    def technical_details(self) -> str:
+        """Get technical details about the rule matching criteria."""
+        details = []
+
+        # Interface info
+        if self.in_interface and self.in_interface != "*":
+            if self.in_interface == "lo":
+                details.append("loopback interface")
+            else:
+                details.append(f"interface: {self.in_interface}")
+
+        # State matching from extra field
+        if self.extra:
+            if "RELATED" in self.extra or "ESTABLISHED" in self.extra:
+                details.append("stateful (established/related)")
+            elif "state NEW" in self.extra:
+                details.append("new connections")
+
+            # ICMP type
+            icmp_types = {
+                "icmp type 3": "destination-unreachable",
+                "icmp type 4": "source-quench",
+                "icmp type 11": "time-exceeded",
+                "icmp type 12": "parameter-problem",
+                "icmp type 8": "echo-request (ping)",
+            }
+            for pattern, desc in icmp_types.items():
+                if pattern in self.extra.lower():
+                    details.append(desc)
+                    break
+
+        return " | ".join(details) if details else ""
 
 
 # Built-in presets
@@ -921,6 +956,9 @@ class IptablesService:
                 source = parts[8]
                 destination = parts[9]
 
+                # Extract interface (column 6 = in, column 7 = out)
+                in_interface = parts[6] if parts[6] != "*" else None
+
                 # Extract port from rest of line (everything after the 10 standard columns)
                 port = None
                 comment = None
@@ -945,6 +983,7 @@ class IptablesService:
                     port=port,
                     comment=comment,
                     extra=rest if rest else None,
+                    in_interface=in_interface,
                 ))
             except (ValueError, IndexError):
                 continue
