@@ -192,7 +192,7 @@ def _show_report(report, iptables: IptablesService, ctx) -> None:
         console.hint("Run 'sm firewall sync' to apply missing rules")
 
     # Preserved rules
-    if report.preserved_rules and ctx.verbose > 0:
+    if report.preserved_rules and ctx.is_verbose:
         console.print()
         console.info(f"Preserved chains: {len(report.preserved_rules)}")
         for rule in report.preserved_rules:
