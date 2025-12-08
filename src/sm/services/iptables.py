@@ -344,6 +344,89 @@ def detect_ssh_port() -> int:
     return DEFAULT_SSH_PORT
 
 
+@dataclass
+class FirewallProviderStatus:
+    """Status of other firewall providers on the system."""
+    ufw_active: bool = False
+    ufw_installed: bool = False
+    firewalld_active: bool = False
+    firewalld_installed: bool = False
+    nftables_active: bool = False
+
+    @property
+    def has_conflicts(self) -> bool:
+        """Check if any conflicting provider is active."""
+        return self.ufw_active or self.firewalld_active
+
+    @property
+    def conflict_names(self) -> list[str]:
+        """Get names of active conflicting providers."""
+        conflicts = []
+        if self.ufw_active:
+            conflicts.append("UFW")
+        if self.firewalld_active:
+            conflicts.append("firewalld")
+        return conflicts
+
+
+def detect_firewall_providers() -> FirewallProviderStatus:
+    """Detect other firewall management tools on the system.
+
+    Returns:
+        FirewallProviderStatus with detection results
+    """
+    status = FirewallProviderStatus()
+
+    # Check UFW
+    try:
+        result = subprocess.run(
+            ["which", "ufw"],
+            capture_output=True,
+            timeout=5,
+        )
+        status.ufw_installed = result.returncode == 0
+
+        if status.ufw_installed:
+            result = subprocess.run(
+                ["ufw", "status"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                status.ufw_active = "Status: active" in result.stdout
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+    # Check firewalld
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "firewalld"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        status.firewalld_installed = True
+        status.firewalld_active = result.stdout.strip() == "active"
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+    # Check if nftables is the primary backend
+    try:
+        result = subprocess.run(
+            ["iptables", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        # If using nf_tables backend, version includes "nf_tables"
+        status.nftables_active = "nf_tables" in result.stdout
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+    return status
+
+
 class IptablesService:
     """Safe interface for iptables firewall management.
 
@@ -389,10 +472,52 @@ class IptablesService:
         self._docker_detected: Optional[bool] = None
         self._internal_cidrs: Optional[list[str]] = None
         self._ipv6_ssh_rule_ok: bool = False  # Track IPv6 SSH rule success
+        self._provider_status: Optional[FirewallProviderStatus] = None
 
     # =========================================================================
     # Detection Methods
     # =========================================================================
+
+    def check_provider_conflicts(self, *, force: bool = False) -> None:
+        """Check for conflicting firewall providers.
+
+        Args:
+            force: If True, warn but don't block
+
+        Raises:
+            FirewallError: If conflicting provider is active and force=False
+        """
+        if self._provider_status is None:
+            self._provider_status = detect_firewall_providers()
+
+        if self._provider_status.has_conflicts:
+            conflicts = ", ".join(self._provider_status.conflict_names)
+            if force:
+                self.ctx.console.warn(
+                    f"Other firewall providers active: {conflicts}. "
+                    "This may cause conflicts!"
+                )
+            else:
+                raise FirewallError(
+                    f"Conflicting firewall provider(s) active: {conflicts}",
+                    hint=f"Disable with: sudo {'ufw disable' if self._provider_status.ufw_active else 'systemctl stop firewalld'}, "
+                         "or use --force to proceed anyway",
+                )
+
+        if self._provider_status.nftables_active:
+            self.ctx.console.info(
+                "Using iptables-nft (nftables backend) - this is supported"
+            )
+
+    def get_provider_status(self) -> FirewallProviderStatus:
+        """Get firewall provider detection status.
+
+        Returns:
+            FirewallProviderStatus object
+        """
+        if self._provider_status is None:
+            self._provider_status = detect_firewall_providers()
+        return self._provider_status
 
     def docker_detected(self) -> bool:
         """Check if Docker is installed and running.
@@ -452,6 +577,31 @@ class IptablesService:
     # Rule Management
     # =========================================================================
 
+    def rule_exists(
+        self,
+        rule: FirewallRule,
+        *,
+        chain: Optional[Chain] = None,
+    ) -> bool:
+        """Check if a rule already exists in iptables.
+
+        Args:
+            rule: FirewallRule to check
+            chain: Chain to check (default: rule's chain)
+
+        Returns:
+            True if rule exists
+        """
+        if self.ctx.dry_run:
+            return False  # In dry-run, assume rule doesn't exist
+
+        target_chain = (chain or rule.chain).value
+        args = rule.to_iptables_args()
+
+        # Use -C (check) to see if rule exists
+        result = self._run_iptables(["-C", target_chain] + args, check=False)
+        return result.returncode == 0
+
     def add_rule(
         self,
         rule: FirewallRule,
@@ -459,14 +609,19 @@ class IptablesService:
         ipv6: bool = True,
         position: int = 1,
         rollback: Optional[RollbackStack] = None,
-    ) -> None:
-        """Add a firewall rule.
+        skip_if_exists: bool = True,
+    ) -> bool:
+        """Add a firewall rule (idempotent).
 
         Args:
             rule: FirewallRule to add
             ipv6: Also add equivalent IPv6 rule
             position: Position to insert rule (1 = top)
             rollback: Rollback stack for cleanup on failure
+            skip_if_exists: Skip adding if rule already exists (default: True)
+
+        Returns:
+            True if rule was added, False if skipped (already exists)
 
         Raises:
             ValidationError: If port or source is invalid
@@ -493,11 +648,16 @@ class IptablesService:
         chain = rule.chain.value
         args = rule.to_iptables_args()
 
+        # Check if rule already exists (idempotency)
+        if skip_if_exists and not self.ctx.dry_run and self.rule_exists(rule):
+            self.ctx.console.info(f"Rule already exists, skipping: {rule}")
+            return False
+
         self.ctx.console.step(f"Adding rule: {rule}")
 
         if self.ctx.dry_run:
             self.ctx.console.dry_run_msg(f"iptables -I {chain} {position} {' '.join(args)}")
-            return
+            return True
 
         # Add to main chain
         self._run_iptables(["-I", chain, str(position)] + args)
@@ -512,12 +672,20 @@ class IptablesService:
         # Add to DOCKER-USER if Docker detected and rule is for INPUT
         if rule.chain == Chain.INPUT and self.docker_detected() and self.docker_user_chain_exists():
             docker_args = rule.to_iptables_args()
-            self._run_iptables(["-I", "DOCKER-USER", str(position)] + docker_args, check=False)
+            # Check DOCKER-USER chain too for idempotency
+            docker_check = self._run_iptables(["-C", "DOCKER-USER"] + docker_args, check=False)
+            if docker_check.returncode != 0:
+                self._run_iptables(["-I", "DOCKER-USER", str(position)] + docker_args, check=False)
 
         # Add IPv6 equivalent
         if ipv6 and rule.source == "0.0.0.0/0":
             ipv6_args = rule.to_iptables_args()
-            self._run_ip6tables(["-I", chain, str(position)] + ipv6_args, check=False)
+            # Check IPv6 too for idempotency
+            ipv6_check = self._run_ip6tables(["-C", chain] + ipv6_args, check=False)
+            if ipv6_check.returncode != 0:
+                self._run_ip6tables(["-I", chain, str(position)] + ipv6_args, check=False)
+
+        return True
 
     def remove_rule(
         self,
@@ -591,6 +759,7 @@ class IptablesService:
         protocol: Protocol = Protocol.TCP,
         source: str = "0.0.0.0/0",
         comment: Optional[str] = None,
+        rollback: Optional[RollbackStack] = None,
     ) -> None:
         """Block traffic on a port.
 
@@ -599,6 +768,7 @@ class IptablesService:
             protocol: Protocol (tcp/udp)
             source: Source IP/CIDR
             comment: Rule description
+            rollback: Rollback stack for cleanup on failure
         """
         if port == self.ssh_port:
             raise FirewallError(
@@ -613,7 +783,7 @@ class IptablesService:
             action=Action.DROP,
             comment=comment or f"Block {protocol.value.upper()}/{port}",
         )
-        self.add_rule(rule)
+        self.add_rule(rule, rollback=rollback)
 
     # =========================================================================
     # Listing and Status
@@ -858,7 +1028,7 @@ class IptablesService:
             ], check=False)
 
     def ensure_icmp_allowed(self) -> None:
-        """Ensure essential ICMP types are allowed.
+        """Ensure essential ICMP types are allowed (idempotent).
 
         Allows critical ICMP messages needed for:
         - Path MTU discovery (type 3)
@@ -871,24 +1041,26 @@ class IptablesService:
             self.ctx.console.dry_run_msg("Ensure essential ICMP allowed")
             return
 
-        # Check if ICMP rule exists (we check for type 3 as indicator)
-        result = self._run_iptables([
-            "-C", "INPUT", "-p", "icmp", "--icmp-type", "3", "-j", "ACCEPT",
-        ], check=False)
+        # Essential ICMP types for IPv4
+        icmp_types = [
+            ("3", "destination-unreachable"),  # Path MTU discovery
+            ("4", "source-quench"),            # Congestion control
+            ("11", "time-exceeded"),           # Traceroute
+            ("12", "parameter-problem"),       # Header problems
+            ("8", "echo-request"),             # Ping (optional but useful)
+        ]
 
-        if result.returncode != 0:
-            self.ctx.console.step("Allowing essential ICMP types")
+        added_any = False
+        for icmp_type, name in icmp_types:
+            # Check if this specific ICMP type rule exists
+            check_result = self._run_iptables([
+                "-C", "INPUT", "-p", "icmp", "--icmp-type", icmp_type, "-j", "ACCEPT",
+            ], check=False)
 
-            # Essential ICMP types for IPv4
-            icmp_types = [
-                ("3", "destination-unreachable"),  # Path MTU discovery
-                ("4", "source-quench"),            # Congestion control
-                ("11", "time-exceeded"),           # Traceroute
-                ("12", "parameter-problem"),       # Header problems
-                ("8", "echo-request"),             # Ping (optional but useful)
-            ]
-
-            for icmp_type, name in icmp_types:
+            if check_result.returncode != 0:
+                if not added_any:
+                    self.ctx.console.step("Allowing essential ICMP types")
+                    added_any = True
                 self._run_iptables([
                     "-A", "INPUT",
                     "-p", "icmp", "--icmp-type", icmp_type,
@@ -896,21 +1068,27 @@ class IptablesService:
                     "-m", "comment", "--comment", f"ICMP {name}",
                 ], check=False)
 
-            # Essential ICMPv6 types for IPv6
-            icmpv6_types = [
-                ("1", "destination-unreachable"),
-                ("2", "packet-too-big"),           # Critical for PMTU
-                ("3", "time-exceeded"),
-                ("4", "parameter-problem"),
-                ("128", "echo-request"),           # Ping
-                ("129", "echo-reply"),             # Ping reply
-                ("133", "router-solicitation"),    # NDP
-                ("134", "router-advertisement"),   # NDP
-                ("135", "neighbor-solicitation"),  # NDP (critical!)
-                ("136", "neighbor-advertisement"), # NDP (critical!)
-            ]
+        # Essential ICMPv6 types for IPv6
+        icmpv6_types = [
+            ("1", "destination-unreachable"),
+            ("2", "packet-too-big"),           # Critical for PMTU
+            ("3", "time-exceeded"),
+            ("4", "parameter-problem"),
+            ("128", "echo-request"),           # Ping
+            ("129", "echo-reply"),             # Ping reply
+            ("133", "router-solicitation"),    # NDP
+            ("134", "router-advertisement"),   # NDP
+            ("135", "neighbor-solicitation"),  # NDP (critical!)
+            ("136", "neighbor-advertisement"), # NDP (critical!)
+        ]
 
-            for icmpv6_type, name in icmpv6_types:
+        for icmpv6_type, name in icmpv6_types:
+            # Check if this specific ICMPv6 type rule exists
+            check_result = self._run_ip6tables([
+                "-C", "INPUT", "-p", "icmpv6", "--icmpv6-type", icmpv6_type, "-j", "ACCEPT",
+            ], check=False)
+
+            if check_result.returncode != 0:
                 self._run_ip6tables([
                     "-A", "INPUT",
                     "-p", "icmpv6", "--icmpv6-type", icmpv6_type,
@@ -1159,21 +1337,31 @@ class IptablesService:
 
         return backup_path
 
-    def flush(self, *, keep_ssh: bool = True) -> None:
+    def flush(self, *, keep_ssh: bool = True, include_docker: bool = False) -> None:
         """Flush all firewall rules.
 
         Args:
             keep_ssh: Re-add SSH allow rule after flush (safety)
+            include_docker: Also flush DOCKER-USER chain if it exists
         """
         self.ctx.console.step("Flushing firewall rules")
 
         if self.ctx.dry_run:
-            self.ctx.console.dry_run_msg("iptables -F")
+            self.ctx.console.dry_run_msg("iptables -F INPUT")
+            if include_docker:
+                self.ctx.console.dry_run_msg("iptables -F DOCKER-USER")
             return
 
         # Flush INPUT
         self._run_iptables(["-F", "INPUT"])
         self._run_ip6tables(["-F", "INPUT"], check=False)
+
+        # Flush DOCKER-USER if requested and exists
+        if include_docker and self.docker_user_chain_exists():
+            self.ctx.console.step("Flushing DOCKER-USER chain")
+            self._run_iptables(["-F", "DOCKER-USER"], check=False)
+            # Re-add the RETURN rule that Docker expects at the end
+            self._run_iptables(["-A", "DOCKER-USER", "-j", "RETURN"], check=False)
 
         # Set policy to ACCEPT
         self._run_iptables(["-P", "INPUT", "ACCEPT"])

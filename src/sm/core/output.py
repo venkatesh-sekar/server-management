@@ -191,6 +191,22 @@ class Console:
             console=self._console,
         )
 
+    # User input
+    def input(self, prompt: str) -> str:
+        """Get text input from user.
+
+        Args:
+            prompt: Prompt to display (supports Rich markup)
+
+        Returns:
+            User's input string
+
+        Raises:
+            EOFError: If input stream is closed
+            KeyboardInterrupt: If user presses Ctrl+C
+        """
+        return self._console.input(prompt)
+
     # Confirmation prompts
     def confirm(
         self,

@@ -35,9 +35,19 @@ from sm.services.iptables import (
     PRESETS,
     validate_port,
     validate_source,
+    detect_firewall_providers,
 )
 from sm.services.systemd import SystemdService
 from sm.services.network import get_ssh_client_ip
+from sm.services.firewall_services import (
+    resolve_service,
+    resolve_source,
+    get_source_definition,
+    is_port_number,
+    format_source_for_display,
+    SERVICES,
+    SOURCE_ALIASES,
+)
 
 
 def _parse_protocol(protocol: str) -> Protocol:
@@ -132,24 +142,23 @@ def firewall_status(
         int,
         typer.Option("--verbose", "-v", count=True, help="Increase verbosity"),
     ] = 0,
+    technical: Annotated[
+        bool,
+        typer.Option("--technical", "-t", help="Show technical details"),
+    ] = False,
     no_color: Annotated[
         bool,
         typer.Option("--no-color", help="Disable colored output"),
     ] = False,
 ) -> None:
-    """Show current firewall status and summary.
+    """Show current firewall status.
 
-    Displays:
-    - Firewall state (enabled/disabled)
-    - Default policy
-    - Docker compatibility status
-    - Rule counts
-    - Persistence status
+    Shows what traffic is allowed through your firewall in an easy-to-read format.
 
     [bold]Examples:[/bold]
 
         sm firewall status
-        sm firewall status -v
+        sm firewall status --technical   # Show technical details
     """
     ctx, iptables = _get_firewall_service(verbose=verbose, no_color=no_color)
 
@@ -158,44 +167,106 @@ def firewall_status(
 
         ctx.console.print()
         ctx.console.print("[bold]Firewall Status[/bold]")
-        ctx.console.print("=" * 40)
         ctx.console.print()
 
-        # State
-        state_color = "green" if status.active else "yellow"
-        state_text = "Enabled (DROP)" if status.active else "Disabled (ACCEPT)"
-        ctx.console.print(f"State:           [{state_color}]{state_text}[/{state_color}]")
-        ctx.console.print(f"Default Policy:  {status.default_policy}")
+        # Main status - simple and clear
+        if status.active:
+            ctx.console.print("  Protection:  [green]ENABLED[/green]")
+            ctx.console.print()
+            ctx.console.print("  Your server is protected. Only allowed traffic can get through.")
+        else:
+            ctx.console.print("  Protection:  [yellow]DISABLED[/yellow]")
+            ctx.console.print()
+            ctx.console.print("  [yellow]Your server accepts ALL traffic![/yellow]")
+            ctx.console.print("  Run [bold]sm firewall setup[/bold] to enable protection.")
+
         ctx.console.print()
 
-        # Docker
-        docker_status = "Active" if status.docker_detected else "Not detected"
-        docker_user = "Configured" if status.docker_user_chain_exists else "Not configured"
-        ctx.console.print(f"Docker:          {docker_status}")
+        # Show what's allowed
+        rules = iptables.list_rules(Chain.INPUT)
+        accept_rules = [r for r in rules if r.target == "ACCEPT" and r.port]
+
+        if accept_rules:
+            ctx.console.print("[bold]Allowed Traffic:[/bold]")
+            ctx.console.print()
+
+            # Group by port and format nicely
+            from sm.services.firewall_services import get_service_by_port
+
+            displayed_ports = set()
+            for rule in accept_rules:
+                if rule.port in displayed_ports:
+                    continue
+                displayed_ports.add(rule.port)
+
+                # Try to find service name
+                try:
+                    proto = Protocol(rule.protocol.lower()) if rule.protocol else Protocol.TCP
+                    service = get_service_by_port(rule.port, proto)
+                except (ValueError, KeyError):
+                    service = None
+
+                if service:
+                    name = f"{service.display_name} ({rule.port})"
+                else:
+                    name = f"Port {rule.port}/{rule.protocol or 'tcp'}"
+
+                # Format source
+                source_display = format_source_for_display(rule.source)
+
+                # Check if it's SSH (protected)
+                is_ssh = rule.port == iptables.ssh_port
+                ssh_marker = " [dim][protected][/dim]" if is_ssh else ""
+
+                ctx.console.print(f"  {name:30} from {source_display}{ssh_marker}")
+
+            ctx.console.print()
+
+        # Show what's blocked
+        if status.active:
+            ctx.console.print("  [dim]Everything else is BLOCKED[/dim]")
+            ctx.console.print()
+
+        # Docker status (simplified)
         if status.docker_detected:
-            ctx.console.print(f"DOCKER-USER:     {docker_user}")
-        ctx.console.print()
+            ctx.console.print(f"  Docker:      Detected - container traffic is protected")
+            ctx.console.print()
 
-        # Rules
-        ctx.console.print(f"IPv4 Rules:      {status.ipv4_rules_count}")
-        ctx.console.print(f"IPv6 Rules:      {status.ipv6_rules_count}")
-        ctx.console.print()
+        # Technical details (only if requested)
+        if technical or verbose > 0:
+            ctx.console.print("[bold]Technical Details:[/bold]")
+            ctx.console.print()
+            ctx.console.print(f"  Default Policy:  {status.default_policy}")
+            ctx.console.print(f"  IPv4 Rules:      {status.ipv4_rules_count}")
+            ctx.console.print(f"  IPv6 Rules:      {status.ipv6_rules_count}")
+            ctx.console.print(f"  SSH Port:        {iptables.ssh_port}")
 
-        # Safety
-        ssh_color = "green" if status.ssh_protected else "red"
-        ssh_text = "Protected" if status.ssh_protected else "NOT PROTECTED"
-        ctx.console.print(f"SSH Protection:  [{ssh_color}]{ssh_text}[/{ssh_color}]")
-        ctx.console.print(f"SSH Port:        {iptables.ssh_port}")
-        ctx.console.print()
+            ssh_color = "green" if status.ssh_protected else "red"
+            ssh_text = "Yes" if status.ssh_protected else "NO!"
+            ctx.console.print(f"  SSH Protected:   [{ssh_color}]{ssh_text}[/{ssh_color}]")
 
-        # Persistence
-        persist_text = "Installed" if status.persistence_installed else "Not installed"
-        ctx.console.print(f"Persistence:     {persist_text}")
-        if status.last_saved:
-            ctx.console.print(f"Last Saved:      {status.last_saved.strftime('%Y-%m-%d %H:%M:%S')}")
-        ctx.console.print()
+            persist_text = "Yes" if status.persistence_installed else "No"
+            ctx.console.print(f"  Persistence:     {persist_text}")
 
-        ctx.console.hint("Use 'sm firewall list' for detailed rules")
+            if status.last_saved:
+                ctx.console.print(f"  Last Saved:      {status.last_saved.strftime('%Y-%m-%d %H:%M:%S')}")
+
+            if status.docker_detected:
+                docker_user = "Yes" if status.docker_user_chain_exists else "No"
+                ctx.console.print(f"  DOCKER-USER:     {docker_user}")
+
+            # Check for other firewall providers
+            providers = iptables.get_provider_status()
+            if providers.has_conflicts:
+                conflicts = ", ".join(providers.conflict_names)
+                ctx.console.print()
+                ctx.console.print(f"  [bold red]WARNING:[/bold red] Other firewalls active: {conflicts}")
+            if providers.nftables_active:
+                ctx.console.print(f"  Backend:         iptables-nft")
+
+            ctx.console.print()
+
+        ctx.console.hint("Use 'sm firewall list' for all rules, or 'sm firewall setup' to configure")
 
     except SMError as e:
         _handle_error(e)
@@ -288,6 +359,10 @@ def firewall_enable(
         Optional[list[int]],
         typer.Option("--allow", help="Additional ports to allow"),
     ] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force", "-f", help="Proceed even if other firewall providers are active"),
+    ] = False,
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Preview changes without executing"),
@@ -330,6 +405,7 @@ def firewall_enable(
     """
     ctx, iptables = _get_firewall_service(
         dry_run=dry_run,
+        force=force,
         yes=yes,
         verbose=verbose,
         no_color=no_color,
@@ -338,6 +414,9 @@ def firewall_enable(
     audit = get_audit_logger()
 
     try:
+        # Check for conflicting firewall providers
+        iptables.check_provider_conflicts(force=force)
+
         # Show configuration
         ctx.console.print()
         ctx.console.print("[bold]Firewall Configuration[/bold]")
@@ -523,15 +602,25 @@ def firewall_disable(
 
 @app.command("allow")
 def firewall_allow(
-    port: Annotated[int, typer.Argument(help="Port number to allow")],
+    target: Annotated[
+        str,
+        typer.Argument(help="Service name (web, postgres) or port number (8080)"),
+    ],
+    from_source: Annotated[
+        Optional[str],
+        typer.Option(
+            "--from", "-f",
+            help="Who can connect: anywhere, local-network, this-machine, or IP/CIDR",
+        ),
+    ] = None,
+    source: Annotated[
+        Optional[str],
+        typer.Option("--source", "-s", hidden=True, help="Alias for --from"),
+    ] = None,
     protocol: Annotated[
         str,
-        typer.Option("--protocol", "--proto", help="Protocol (tcp/udp)"),
+        typer.Option("--protocol", "--proto", help="Protocol (tcp/udp) - only for port numbers"),
     ] = "tcp",
-    source: Annotated[
-        str,
-        typer.Option("--source", "-s", help="Source IP/CIDR (default: any)"),
-    ] = "0.0.0.0/0",
     comment: Annotated[
         Optional[str],
         typer.Option("--comment", help="Rule description"),
@@ -539,6 +628,10 @@ def firewall_allow(
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Preview changes without executing"),
+    ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Skip confirmation prompts"),
     ] = False,
     verbose: Annotated[
         int,
@@ -549,66 +642,206 @@ def firewall_allow(
         typer.Option("--no-color", help="Disable colored output"),
     ] = False,
 ) -> None:
-    """Add rule to allow traffic on a port.
+    """Allow a service or port through the firewall.
+
+    [bold]Services:[/bold]
+    web, http, https, postgres, mysql, redis, ssh, dns, docker-swarm, mail
+
+    [bold]Access Sources (--from):[/bold]
+    - anywhere: Any IP address (use for public services)
+    - local-network: Only private/internal networks
+    - this-machine: Only localhost
+    - IP/CIDR: Specific address (e.g., 10.0.0.0/8)
 
     [bold]Examples:[/bold]
 
-        # Allow port 8080
-        sudo sm firewall allow 8080
+        # Allow web traffic from anywhere
+        sudo sm firewall allow web
 
-        # Allow from specific network
+        # Allow PostgreSQL from local network only
+        sudo sm firewall allow postgres --from local-network
+
+        # Allow custom port
+        sudo sm firewall allow 8080 --from anywhere
+
+        # Allow from specific IP
+        sudo sm firewall allow postgres --from 10.0.0.5
+
+        # Legacy syntax still works
         sudo sm firewall allow 5432 --source 10.0.0.0/8
-
-        # UDP port
-        sudo sm firewall allow 53 --protocol udp
-
-        # With description
-        sudo sm firewall allow 3000 --comment "Dev server"
     """
     ctx, iptables = _get_firewall_service(
         dry_run=dry_run,
+        yes=yes,
         verbose=verbose,
         no_color=no_color,
     )
     _check_root(ctx)
     audit = get_audit_logger()
 
+    # Handle --source as alias for --from (backwards compatibility)
+    effective_source = from_source or source
+
     try:
-        # Validate inputs early
-        validate_port(port)
-        validate_source(source)
-        proto = _parse_protocol(protocol)
+        # Resolve service name or port
+        service = resolve_service(target)
 
-        # Backup before making changes
-        iptables.backup(suffix="-pre-allow")
-
-        iptables.allow_port(
-            port=port,
-            protocol=proto,
-            source=source,
-            comment=comment,
-        )
-
-        iptables.save()
-
-        ctx.console.print()
-        ctx.console.success(f"Allowed {protocol.upper()}/{port}")
-
-        audit.log_success(
-            AuditEventType.FIREWALL_RULE_ADD,
-            "firewall",
-            f"{protocol}/{port}",
-            message=f"Allowed {protocol.upper()}/{port} from {source}",
-        )
+        if service:
+            # It's a service name
+            _allow_service(
+                ctx, iptables, audit, service, effective_source, comment, dry_run, yes
+            )
+        elif is_port_number(target):
+            # It's a port number
+            port = int(target)
+            _allow_port(
+                ctx, iptables, audit, port, protocol, effective_source, comment
+            )
+        else:
+            # Unknown target
+            ctx.console.error(f"Unknown service or invalid port: {target}")
+            ctx.console.print()
+            ctx.console.print("[bold]Available services:[/bold]")
+            for name, svc in SERVICES.items():
+                ports = ", ".join(f"{p.port}/{p.protocol.value}" for p in svc.ports)
+                ctx.console.print(f"  {name:15} {svc.display_name} ({ports})")
+            ctx.console.print()
+            ctx.console.hint("Or use a port number: sm firewall allow 8080")
+            raise typer.Exit(1)
 
     except SMError as e:
         audit.log_failure(
             AuditEventType.FIREWALL_RULE_ADD,
             "firewall",
-            f"{protocol}/{port}",
+            target,
             error=str(e),
         )
         _handle_error(e)
+
+
+def _allow_service(
+    ctx,
+    iptables: IptablesService,
+    audit,
+    service,
+    source_input: Optional[str],
+    comment: Optional[str],
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    """Allow a service through the firewall."""
+    # Determine source - use service default if not specified
+    if source_input:
+        source_str = source_input
+    else:
+        source_str = service.default_source
+
+    # Resolve source to CIDRs
+    source_cidrs = resolve_source(source_str)
+    source_def = get_source_definition(source_str)
+    source_display = source_def.display_name if source_def else source_str
+
+    # Show what we're about to do
+    ctx.console.print()
+    ctx.console.print(f"[bold]Allowing {service.display_name}[/bold]")
+    ctx.console.print()
+
+    ports_str = ", ".join(f"{p.port}/{p.protocol.value}" for p in service.ports)
+    ctx.console.print(f"  Service: {service.display_name}")
+    ctx.console.print(f"  Ports:   {ports_str}")
+    ctx.console.print(f"  From:    {source_display}")
+    if len(source_cidrs) > 1:
+        ctx.console.print(f"           ({', '.join(source_cidrs)})")
+    ctx.console.print()
+
+    # Show warning if applicable
+    if service.warning and source_str == "anywhere":
+        ctx.console.warn(service.warning)
+        ctx.console.print()
+
+    # Confirm if opening sensitive service to anywhere
+    if (service.category == "database" and source_str == "anywhere"
+            and not yes and not dry_run):
+        if not ctx.console.confirm(
+            f"Open {service.display_name} to the ENTIRE INTERNET? This is risky!"
+        ):
+            ctx.console.warn("Operation cancelled")
+            raise typer.Exit(0)
+
+    # Backup before making changes
+    iptables.backup(suffix="-pre-allow")
+
+    # Add rules for each port and source CIDR
+    for port_spec in service.ports:
+        rule_comment = comment or f"{service.display_name}"
+        for cidr in source_cidrs:
+            iptables.allow_port(
+                port=port_spec.port,
+                protocol=port_spec.protocol,
+                source=cidr,
+                comment=rule_comment,
+            )
+
+    iptables.save()
+
+    ctx.console.print()
+    ctx.console.success(f"Allowed {service.display_name} from {source_display}")
+
+    audit.log_success(
+        AuditEventType.FIREWALL_RULE_ADD,
+        "firewall",
+        service.name,
+        message=f"Allowed {service.display_name} from {source_display}",
+    )
+
+
+def _allow_port(
+    ctx,
+    iptables: IptablesService,
+    audit,
+    port: int,
+    protocol: str,
+    source_input: Optional[str],
+    comment: Optional[str],
+) -> None:
+    """Allow a single port through the firewall."""
+    # Default source is anywhere
+    source_str = source_input or "anywhere"
+
+    # Resolve source to CIDRs
+    source_cidrs = resolve_source(source_str)
+    source_def = get_source_definition(source_str)
+    source_display = source_def.display_name if source_def else source_str
+
+    # Validate
+    validate_port(port)
+    for cidr in source_cidrs:
+        validate_source(cidr)
+    proto = _parse_protocol(protocol)
+
+    # Backup before making changes
+    iptables.backup(suffix="-pre-allow")
+
+    # Add rule for each source CIDR
+    for cidr in source_cidrs:
+        iptables.allow_port(
+            port=port,
+            protocol=proto,
+            source=cidr,
+            comment=comment,
+        )
+
+    iptables.save()
+
+    ctx.console.print()
+    ctx.console.success(f"Allowed {protocol.upper()}/{port} from {source_display}")
+
+    audit.log_success(
+        AuditEventType.FIREWALL_RULE_ADD,
+        "firewall",
+        f"{protocol}/{port}",
+        message=f"Allowed {protocol.upper()}/{port} from {source_display}",
+    )
 
 
 # =============================================================================
@@ -617,22 +850,32 @@ def firewall_allow(
 
 @app.command("deny")
 def firewall_deny(
-    port: Annotated[int, typer.Argument(help="Port number to block")],
+    target: Annotated[
+        str,
+        typer.Argument(help="Service name (mysql, redis) or port number (3306)"),
+    ],
+    from_source: Annotated[
+        Optional[str],
+        typer.Option(
+            "--from",
+            help="Block from: anywhere, local-network, this-machine, or IP/CIDR",
+        ),
+    ] = None,
+    source: Annotated[
+        Optional[str],
+        typer.Option("--source", "-s", hidden=True, help="Alias for --from"),
+    ] = None,
     protocol: Annotated[
         str,
-        typer.Option("--protocol", "--proto", help="Protocol (tcp/udp)"),
+        typer.Option("--protocol", "--proto", help="Protocol (tcp/udp) - only for port numbers"),
     ] = "tcp",
-    source: Annotated[
-        str,
-        typer.Option("--source", "-s", help="Source IP/CIDR (default: any)"),
-    ] = "0.0.0.0/0",
     comment: Annotated[
         Optional[str],
         typer.Option("--comment", help="Rule description"),
     ] = None,
     force: Annotated[
         bool,
-        typer.Option("--force", "-f", help="Allow dangerous operation"),
+        typer.Option("--force", help="Required to confirm blocking"),
     ] = False,
     dry_run: Annotated[
         bool,
@@ -647,17 +890,20 @@ def firewall_deny(
         typer.Option("--no-color", help="Disable colored output"),
     ] = False,
 ) -> None:
-    """Add rule to block traffic on a port.
+    """Block a service or port.
 
-    Requires --force flag. Cannot block SSH port (auto-detected from sshd_config).
+    Requires --force flag. Cannot block SSH (safety protection).
 
     [bold]Examples:[/bold]
 
-        # Block port 3306 (MySQL)
+        # Block MySQL
+        sudo sm firewall deny mysql --force
+
+        # Block a specific port
         sudo sm firewall deny 3306 --force
 
-        # Block from specific IP
-        sudo sm firewall deny 8080 --source 1.2.3.4 --force
+        # Block from specific IP only
+        sudo sm firewall deny 8080 --from 1.2.3.4 --force
     """
     ctx, iptables = _get_firewall_service(
         dry_run=dry_run,
@@ -669,45 +915,130 @@ def firewall_deny(
     audit = get_audit_logger()
 
     if not force:
-        ctx.console.error("Blocking ports requires --force flag")
+        ctx.console.error("Blocking requires --force flag")
+        ctx.console.hint("Use: sm firewall deny <target> --force")
         raise typer.Exit(4)
 
+    # Handle --source as alias for --from
+    effective_source = from_source or source or "anywhere"
+
     try:
-        # Validate inputs early
-        validate_port(port)
-        validate_source(source)
-        proto = _parse_protocol(protocol)
+        # Resolve service name or port
+        service = resolve_service(target)
 
-        # Backup before making changes
-        iptables.backup(suffix="-pre-deny")
+        if service:
+            # Check if it's SSH (protected)
+            if service.always_allowed:
+                ctx.console.error(f"Cannot block {service.display_name} - it is protected")
+                ctx.console.hint("SSH must remain accessible for server management")
+                raise typer.Exit(4)
 
-        iptables.deny_port(
-            port=port,
-            protocol=proto,
-            source=source,
-            comment=comment,
-        )
-
-        iptables.save()
-
-        ctx.console.print()
-        ctx.console.success(f"Blocked {protocol.upper()}/{port}")
-
-        audit.log_success(
-            AuditEventType.FIREWALL_RULE_ADD,
-            "firewall",
-            f"{protocol}/{port}",
-            message=f"Blocked {protocol.upper()}/{port}",
-        )
+            # Block service
+            _deny_service(ctx, iptables, audit, service, effective_source, comment)
+        elif is_port_number(target):
+            # It's a port number
+            port = int(target)
+            _deny_port(ctx, iptables, audit, port, protocol, effective_source, comment)
+        else:
+            # Unknown target
+            ctx.console.error(f"Unknown service or invalid port: {target}")
+            raise typer.Exit(1)
 
     except SMError as e:
         audit.log_failure(
             AuditEventType.FIREWALL_RULE_ADD,
             "firewall",
-            f"{protocol}/{port}",
+            target,
             error=str(e),
         )
         _handle_error(e)
+
+
+def _deny_service(
+    ctx,
+    iptables: IptablesService,
+    audit,
+    service,
+    source_str: str,
+    comment: Optional[str],
+) -> None:
+    """Block a service."""
+    # Resolve source to CIDRs
+    source_cidrs = resolve_source(source_str)
+    source_def = get_source_definition(source_str)
+    source_display = source_def.display_name if source_def else source_str
+
+    # Backup before making changes
+    iptables.backup(suffix="-pre-deny")
+
+    # Add deny rules for each port and source CIDR
+    for port_spec in service.ports:
+        rule_comment = comment or f"Block {service.display_name}"
+        for cidr in source_cidrs:
+            iptables.deny_port(
+                port=port_spec.port,
+                protocol=port_spec.protocol,
+                source=cidr,
+                comment=rule_comment,
+            )
+
+    iptables.save()
+
+    ctx.console.print()
+    ctx.console.success(f"Blocked {service.display_name} from {source_display}")
+
+    audit.log_success(
+        AuditEventType.FIREWALL_RULE_ADD,
+        "firewall",
+        service.name,
+        message=f"Blocked {service.display_name} from {source_display}",
+    )
+
+
+def _deny_port(
+    ctx,
+    iptables: IptablesService,
+    audit,
+    port: int,
+    protocol: str,
+    source_str: str,
+    comment: Optional[str],
+) -> None:
+    """Block a single port."""
+    # Resolve source to CIDRs
+    source_cidrs = resolve_source(source_str)
+    source_def = get_source_definition(source_str)
+    source_display = source_def.display_name if source_def else source_str
+
+    # Validate
+    validate_port(port)
+    for cidr in source_cidrs:
+        validate_source(cidr)
+    proto = _parse_protocol(protocol)
+
+    # Backup before making changes
+    iptables.backup(suffix="-pre-deny")
+
+    # Add deny rule for each source CIDR
+    for cidr in source_cidrs:
+        iptables.deny_port(
+            port=port,
+            protocol=proto,
+            source=cidr,
+            comment=comment,
+        )
+
+    iptables.save()
+
+    ctx.console.print()
+    ctx.console.success(f"Blocked {protocol.upper()}/{port} from {source_display}")
+
+    audit.log_success(
+        AuditEventType.FIREWALL_RULE_ADD,
+        "firewall",
+        f"{protocol}/{port}",
+        message=f"Blocked {protocol.upper()}/{port} from {source_display}",
+    )
 
 
 # =============================================================================
@@ -856,6 +1187,10 @@ def firewall_reset(
         Optional[str],
         typer.Option("--confirm-name", help="Confirm resource name for critical operations"),
     ] = None,
+    include_docker: Annotated[
+        bool,
+        typer.Option("--include-docker", help="Also flush DOCKER-USER chain"),
+    ] = False,
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Preview changes without executing"),
@@ -878,6 +1213,7 @@ def firewall_reset(
     [bold]Examples:[/bold]
 
         sudo sm firewall reset --force --confirm-name=firewall
+        sudo sm firewall reset --force --confirm-name=firewall --include-docker
     """
     ctx, iptables = _get_firewall_service(
         dry_run=dry_run,
@@ -906,7 +1242,7 @@ def firewall_reset(
         ctx.console.info(f"Backup created: {backup_path}")
 
         # Flush all rules
-        iptables.flush(keep_ssh=True)
+        iptables.flush(keep_ssh=True, include_docker=include_docker)
 
         # Save the clean state
         iptables.save()
@@ -1114,3 +1450,114 @@ def preset_apply(
 
     except SMError as e:
         _handle_error(e)
+
+
+# =============================================================================
+# Setup Command (Interactive Wizard)
+# =============================================================================
+
+@app.command("setup")
+def firewall_setup(
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Preview changes without executing"),
+    ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Skip confirmation prompts"),
+    ] = False,
+    verbose: Annotated[
+        int,
+        typer.Option("--verbose", "-v", count=True, help="Increase verbosity"),
+    ] = 0,
+) -> None:
+    """Interactive firewall setup wizard.
+
+    Guides you through setting up your firewall step by step.
+    Perfect for users who are new to firewall configuration.
+
+    [bold]What it does:[/bold]
+
+    1. Asks what type of server you're running
+    2. Helps you select which services to allow
+    3. Configures who can access each service
+    4. Reviews the configuration before applying
+    5. Enables the firewall with your settings
+
+    SSH access is ALWAYS kept open so you don't get locked out.
+
+    [bold]Examples:[/bold]
+
+        sudo sm firewall setup
+        sm firewall setup --dry-run   # Preview without changes
+    """
+    from sm.commands.firewall.wizard import FirewallWizard
+
+    try:
+        wizard = FirewallWizard(dry_run=dry_run, yes=yes, verbose=verbose)
+        wizard.run()
+    except SMError as e:
+        _handle_error(e)
+
+
+# =============================================================================
+# Services Command (List available services)
+# =============================================================================
+
+@app.command("services")
+def firewall_services(
+    no_color: Annotated[
+        bool,
+        typer.Option("--no-color", help="Disable colored output"),
+    ] = False,
+) -> None:
+    """List available service names for allow/deny commands.
+
+    [bold]Examples:[/bold]
+
+        sm firewall services
+    """
+    ctx, _ = _get_firewall_service(no_color=no_color)
+
+    ctx.console.print()
+    ctx.console.print("[bold]Available Services[/bold]")
+    ctx.console.print()
+    ctx.console.print("Use these names with [bold]sm firewall allow[/bold] or [bold]sm firewall deny[/bold]")
+    ctx.console.print()
+
+    # Group by category
+    categories = {}
+    for name, svc in SERVICES.items():
+        if svc.category not in categories:
+            categories[svc.category] = []
+        categories[svc.category].append((name, svc))
+
+    category_names = {
+        "web": "Web Services",
+        "database": "Databases",
+        "system": "System Services",
+        "containers": "Docker/Containers",
+        "monitoring": "Monitoring",
+        "mail": "Mail Services",
+    }
+
+    for category, services in categories.items():
+        title = category_names.get(category, category.title())
+        ctx.console.print(f"[bold cyan]{title}[/bold cyan]")
+
+        for name, svc in services:
+            ports = ", ".join(f"{p.port}/{p.protocol.value}" for p in svc.ports)
+            default = f"[dim](default: {svc.default_source})[/dim]"
+            ctx.console.print(f"  {name:15} {svc.display_name:20} {ports:15} {default}")
+
+        ctx.console.print()
+
+    ctx.console.print("[bold]Access Sources (--from option)[/bold]")
+    ctx.console.print()
+
+    for name, source_def in SOURCE_ALIASES.items():
+        ctx.console.print(f"  {name:15} {source_def.display_name}")
+
+    ctx.console.print()
+    ctx.console.print("[dim]You can also use IP addresses or CIDR notation (e.g., 10.0.0.0/8)[/dim]")
+    ctx.console.print()
