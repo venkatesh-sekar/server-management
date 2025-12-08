@@ -284,7 +284,7 @@ def firewall_list(
     chain: Annotated[
         str,
         typer.Option("--chain", "-c", help="Chain to list (INPUT, DOCKER-USER, all)"),
-    ] = "INPUT",
+    ] = "all",
     verbose: Annotated[
         int,
         typer.Option("--verbose", "-v", count=True, help="Increase verbosity"),
