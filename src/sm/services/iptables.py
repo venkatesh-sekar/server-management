@@ -838,34 +838,44 @@ class IptablesService:
         return self._parse_iptables_output(result.stdout)
 
     def _parse_iptables_output(self, output: str) -> list[ParsedRule]:
-        """Parse iptables -L output into ParsedRule objects."""
+        """Parse iptables -L -v --line-numbers output into ParsedRule objects.
+
+        The verbose (-v) output format has these columns:
+        num  pkts bytes target  prot opt in  out  source       destination  [extras]
+        0    1    2     3       4    5   6   7    8            9            10+
+
+        Example line:
+        1    29111  271K ACCEPT  tcp  --  *   *    0.0.0.0/0    0.0.0.0/0    tcp dpt:22
+        """
         rules = []
         lines = output.strip().splitlines()
 
-        # Skip header lines
+        # Skip header lines (Chain info + column headers)
         for line in lines[2:]:
             parts = line.split()
-            if len(parts) < 8:
+            if len(parts) < 10:
                 continue
 
             try:
+                # Verbose format with line numbers:
+                # [0]=num [1]=pkts [2]=bytes [3]=target [4]=prot [5]=opt [6]=in [7]=out [8]=source [9]=dest
                 num = int(parts[0])
-                target = parts[1]
-                protocol = parts[2]
-                source = parts[7]
-                destination = parts[8]
+                target = parts[3]
+                protocol = parts[4]
+                source = parts[8]
+                destination = parts[9]
 
-                # Extract port from rest of line
+                # Extract port from rest of line (everything after the 10 standard columns)
                 port = None
                 comment = None
-                rest = " ".join(parts[9:]) if len(parts) > 9 else ""
+                rest = " ".join(parts[10:]) if len(parts) > 10 else ""
 
-                # Look for dpt:PORT
+                # Look for dpt:PORT (destination port)
                 port_match = re.search(r"dpt:(\d+)", rest)
                 if port_match:
                     port = int(port_match.group(1))
 
-                # Look for comment
+                # Look for comment in /* ... */ format
                 comment_match = re.search(r'/\* (.+?) \*/', rest)
                 if comment_match:
                     comment = comment_match.group(1)

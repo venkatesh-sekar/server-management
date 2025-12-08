@@ -307,6 +307,18 @@ def firewall_list(
     try:
         chains_to_list = ["INPUT", "DOCKER-USER"] if chain == "all" else [chain]
 
+        # Print explanation header
+        ctx.console.print()
+        ctx.console.print("[bold]Firewall Rules[/bold]")
+        ctx.console.print()
+        ctx.console.print("[dim]How to read this table:[/dim]")
+        ctx.console.print("  [cyan]#[/cyan]        Rule number (order matters - first match wins)")
+        ctx.console.print("  [cyan]Proto[/cyan]    Protocol: tcp, udp, icmp, or all")
+        ctx.console.print("  [cyan]Port[/cyan]     Port number (- means all ports)")
+        ctx.console.print("  [cyan]Source[/cyan]   Who can connect: IP address or 0.0.0.0/0 (anyone)")
+        ctx.console.print("  [cyan]Action[/cyan]   [green]ACCEPT[/green] = allow traffic, [red]DROP[/red] = block silently, [red]REJECT[/red] = block with response")
+        ctx.console.print()
+
         for chain_name in chains_to_list:
             try:
                 chain_enum = Chain(chain_name)
@@ -316,11 +328,19 @@ def firewall_list(
 
             rules = iptables.list_rules(chain_enum)
 
+            # Explain what this chain does
+            if chain_name == "INPUT":
+                chain_desc = "Controls traffic coming INTO your server"
+            elif chain_name == "DOCKER-USER":
+                chain_desc = "Controls traffic to Docker containers (processed before Docker's own rules)"
+            else:
+                chain_desc = ""
+
             # Create table
-            table = Table(title=f"{chain_name} Chain")
-            table.add_column("#", style="dim")
+            table = Table(title=f"{chain_name} Chain", caption=chain_desc if chain_desc else None)
+            table.add_column("#", style="dim", justify="right")
             table.add_column("Proto", style="cyan")
-            table.add_column("Port")
+            table.add_column("Port", justify="right")
             table.add_column("Source")
             table.add_column("Action", style="bold")
             table.add_column("Description", style="dim")
@@ -329,20 +349,43 @@ def firewall_list(
                 action_color = "green" if rule.target == "ACCEPT" else "red"
                 port_str = str(rule.port) if rule.port else "-"
 
+                # Make source more readable
+                source_display = rule.source
+                if rule.source == "0.0.0.0/0":
+                    source_display = "anywhere"
+                elif rule.source == "127.0.0.1" or rule.source == "127.0.0.0/8":
+                    source_display = "localhost"
+
                 table.add_row(
                     str(rule.num),
                     rule.protocol,
                     port_str,
-                    rule.source,
+                    source_display,
                     f"[{action_color}]{rule.target}[/{action_color}]",
                     rule.comment or "",
                 )
 
-            ctx.console.print()
             ctx.console.print(table)
+            ctx.console.print()
 
         if not rules:
             ctx.console.info("No rules found")
+        else:
+            # Print helpful footer
+            ctx.console.print("[dim]─────────────────────────────────────────────────────────────[/dim]")
+            ctx.console.print()
+            ctx.console.print("[bold]What does this mean?[/bold]")
+            ctx.console.print()
+            ctx.console.print("  Rules are processed top-to-bottom. The first matching rule wins.")
+            ctx.console.print("  Traffic that doesn't match any rule uses the chain's default policy.")
+            ctx.console.print()
+            ctx.console.print("[bold]Common patterns:[/bold]")
+            ctx.console.print("  • [green]ACCEPT[/green] tcp port 22 from anywhere  → SSH access allowed")
+            ctx.console.print("  • [green]ACCEPT[/green] tcp port 80 from anywhere  → Web traffic allowed")
+            ctx.console.print("  • [green]ACCEPT[/green] tcp port 5432 from 10.x.x.x → Database access from internal network only")
+            ctx.console.print("  • [red]DROP[/red] all from anywhere            → Block everything else")
+            ctx.console.print()
+            ctx.console.hint("Use 'sm firewall status' for a simpler overview")
 
     except SMError as e:
         _handle_error(e)
