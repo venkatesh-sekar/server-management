@@ -706,6 +706,12 @@ def security_harden(
         handle_error(e)
 
 
+# Import and register security audit command
+from sm.commands.security.audit import audit as security_audit_command
+
+security_app.command("audit")(security_audit_command)
+
+
 @observability_app.command("setup")
 def observability_setup_cmd(
     dry_run: DryRunOption = False,
