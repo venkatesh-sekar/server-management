@@ -63,6 +63,12 @@ docker_app = typer.Typer(
     no_args_is_help=True,
 )
 
+mongodb_app = typer.Typer(
+    name="mongodb",
+    help="MongoDB management commands.",
+    no_args_is_help=True,
+)
+
 # Import sub-commands
 from sm.commands.postgres.user import app as postgres_user_app
 from sm.commands.postgres.db import app as postgres_db_app
@@ -72,6 +78,10 @@ from sm.commands.postgres.restore import app as postgres_restore_app
 from sm.commands.postgres.migrate import app as postgres_migrate_app
 from sm.commands.docker import app as docker_commands_app
 from sm.commands.firewall import app as firewall_app
+from sm.commands.mongodb.user import app as mongodb_user_app
+from sm.commands.mongodb.db import app as mongodb_db_app
+from sm.commands.mongodb.backup import app as mongodb_backup_app
+from sm.commands.mongodb.restore import app as mongodb_restore_app
 
 # Register postgres sub-commands
 postgres_app.add_typer(postgres_user_app, name="user")
@@ -81,8 +91,15 @@ postgres_app.add_typer(postgres_backup_app, name="backup")
 postgres_app.add_typer(postgres_restore_app, name="restore")
 postgres_app.add_typer(postgres_migrate_app, name="migrate")
 
+# Register mongodb sub-commands
+mongodb_app.add_typer(mongodb_user_app, name="user")
+mongodb_app.add_typer(mongodb_db_app, name="db")
+mongodb_app.add_typer(mongodb_backup_app, name="backup")
+mongodb_app.add_typer(mongodb_restore_app, name="restore")
+
 # Register command groups
 app.add_typer(postgres_app, name="postgres")
+app.add_typer(mongodb_app, name="mongodb")
 app.add_typer(security_app, name="security")
 app.add_typer(observability_app, name="observability")
 app.add_typer(config_app, name="config")
@@ -193,7 +210,7 @@ def main(
 ) -> None:
     """Server Management CLI - Secure server administration tool.
 
-    A production-ready CLI for managing PostgreSQL, security hardening,
+    A production-ready CLI for managing PostgreSQL, MongoDB, security hardening,
     and observability on Debian/Ubuntu servers.
 
     [bold]Features:[/bold]
@@ -205,6 +222,8 @@ def main(
     [bold]Examples:[/bold]
         sm postgres setup --dry-run
         sm postgres user create -d myapp -u myapp_user
+        sm mongodb setup --dry-run
+        sm mongodb db create-with-user -d myapp
         sm security harden
         sm config show
     """
@@ -368,6 +387,76 @@ def config_example(no_color: NoColorOption = False) -> None:
     ctx = get_context(no_color=no_color)
     example = get_example_config()
     ctx.console.print(example)
+
+
+# ============================================================================
+# MongoDB setup command
+# ============================================================================
+
+@mongodb_app.command("setup")
+def mongodb_setup_cmd(
+    dry_run: DryRunOption = False,
+    yes: YesOption = False,
+    verbose: VerboseOption = 0,
+    config: ConfigOption = None,
+    no_color: NoColorOption = False,
+) -> None:
+    """Set up MongoDB 7.0 with security hardening.
+
+    Performs complete MongoDB installation and configuration:
+    - Installs MongoDB 7.0 from official repository
+    - Configures WiredTiger storage engine
+    - Enables authorization with SCRAM-SHA-256
+    - Creates admin user with secure password
+    - Binds to localhost only (secure default)
+
+    [bold]Prerequisites:[/bold]
+    - Debian or Ubuntu system
+    - Root access
+
+    [bold]Examples:[/bold]
+
+        # Full setup
+        sudo sm mongodb setup
+
+        # Preview what would happen
+        sm mongodb setup --dry-run
+    """
+    from sm.commands.mongodb.setup import run_setup
+
+    ctx = get_context(
+        dry_run=dry_run,
+        yes=yes,
+        verbose=verbose,
+        config=config,
+        no_color=no_color,
+    )
+
+    # Check root
+    import os
+    if os.geteuid() != 0:
+        ctx.console.error("This operation requires root privileges")
+        ctx.console.hint("Run with: sudo sm mongodb setup")
+        raise typer.Exit(6)
+
+    # Show configuration
+    ctx.console.print()
+    ctx.console.print("[bold]MongoDB Setup Configuration[/bold]")
+    ctx.console.print("  MongoDB version: 7.0")
+    ctx.console.print("  Storage engine:  WiredTiger")
+    ctx.console.print("  Auth mechanism:  SCRAM-SHA-256")
+    ctx.console.print("  Bind address:    127.0.0.1 (localhost only)")
+    ctx.console.print()
+
+    if not yes and not dry_run:
+        if not ctx.console.confirm("Proceed with MongoDB setup?"):
+            ctx.console.warn("Operation cancelled")
+            raise typer.Exit(0)
+
+    try:
+        run_setup(ctx)
+    except SMError as e:
+        handle_error(e)
 
 
 # ============================================================================
@@ -809,6 +898,14 @@ def setup_cmd(
             is_flag=True,
         ),
     ] = False,
+    mongodb: Annotated[
+        bool,
+        typer.Option(
+            "--mongodb",
+            help="Setup MongoDB 7.0",
+            is_flag=True,
+        ),
+    ] = False,
     otlp_endpoint: Annotated[
         Optional[str],
         typer.Option(
@@ -838,15 +935,18 @@ def setup_cmd(
     """Setup server with selected components.
 
     One command to configure your server with Docker, security hardening,
-    observability, and PostgreSQL.
+    observability, PostgreSQL, and MongoDB.
 
     [bold]Examples:[/bold]
 
         # Docker + security (most common)
         sudo sm setup --docker --security
 
-        # Full stack
+        # Full stack with PostgreSQL
         sudo sm setup --docker --security --postgres
+
+        # Full stack with MongoDB
+        sudo sm setup --docker --security --mongodb
 
         # With observability
         sudo sm setup --docker --security --observability --otlp-endpoint=http://signoz:4318
@@ -881,6 +981,8 @@ def setup_cmd(
             components.append("Observability")
         if postgres:
             components.append("PostgreSQL")
+        if mongodb:
+            components.append("MongoDB")
 
         if components:
             ctx.console.print(f"Components to install: {', '.join(components)}")
@@ -895,6 +997,7 @@ def setup_cmd(
             security=security,
             observability=observability,
             postgres=postgres,
+            mongodb=mongodb,
             otlp_endpoint=otlp_endpoint,
             hostname=hostname,
             mtu=mtu,

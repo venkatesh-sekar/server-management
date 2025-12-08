@@ -18,6 +18,7 @@ def run_setup(
     security: bool = False,
     observability: bool = False,
     postgres: bool = False,
+    mongodb: bool = False,
     otlp_endpoint: Optional[str] = None,
     hostname: Optional[str] = None,
     mtu: Optional[int] = None,
@@ -30,6 +31,7 @@ def run_setup(
         security: Apply security hardening
         observability: Setup OpenTelemetry collector
         postgres: Setup PostgreSQL
+        mongodb: Setup MongoDB 7.0
         otlp_endpoint: OTLP endpoint for observability
         hostname: Set server hostname
         mtu: Docker MTU value (default 1450 for Hetzner)
@@ -43,6 +45,8 @@ def run_setup(
         components.append("Observability")
     if postgres:
         components.append("PostgreSQL")
+    if mongodb:
+        components.append("MongoDB")
     if hostname:
         components.append(f"Hostname ({hostname})")
 
@@ -176,6 +180,26 @@ def run_setup(
                     ctx.console.success("PostgreSQL verified and accepting connections")
                 else:
                     ctx.console.warn("PostgreSQL installed but may need time to start")
+
+        # MongoDB
+        if mongodb:
+            ctx.console.step("Setting up MongoDB 7.0")
+            if ctx.dry_run:
+                ctx.console.dry_run("Would run: sm mongodb setup")
+            else:
+                from sm.commands.mongodb.setup import run_setup as run_mongodb_setup
+                run_mongodb_setup(ctx)
+                # Verify MongoDB is accepting connections
+                result = subprocess.run(
+                    ["mongosh", "--quiet", "--eval", "db.adminCommand('ping')",
+                     "mongodb://127.0.0.1:27017/admin"],
+                    capture_output=True,
+                    timeout=10,
+                )
+                if result.returncode == 0:
+                    ctx.console.success("MongoDB verified and accepting connections")
+                else:
+                    ctx.console.warn("MongoDB installed but may need time to start")
 
         ctx.console.print()
         ctx.console.success("Server setup complete!")

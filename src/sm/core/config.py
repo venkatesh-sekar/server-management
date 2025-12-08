@@ -133,6 +133,53 @@ class ExportConfig(BaseModel):
         return v
 
 
+class MongoDBConfig(BaseModel):
+    """MongoDB configuration."""
+
+    version: str = "7.0"
+    host: str = "127.0.0.1"
+    port: int = 27017
+    data_dir: Path = Path("/var/lib/mongodb")
+    auth_database: str = "admin"
+
+    @field_validator("version")
+    @classmethod
+    def validate_version(cls, v: str) -> str:
+        if not v.startswith("7."):
+            raise ValueError("Only MongoDB 7.x versions are supported")
+        return v
+
+    @field_validator("port")
+    @classmethod
+    def validate_port(cls, v: int) -> int:
+        return validate_port(v)
+
+
+class MongoExportConfig(BaseModel):
+    """Configuration for mongodump exports to S3.
+
+    Uses same S3 credentials as PostgreSQL backup but separate path.
+    """
+
+    # S3 path prefix - MUST be different from pgBackRest and pg-exports paths
+    export_path: str = "/mongo-exports"  # Results in s3://bucket/mongo-exports/
+
+    # Enable gzip compression for mongodump
+    compression: bool = True
+
+    @field_validator("export_path")
+    @classmethod
+    def validate_export_path(cls, v: str) -> str:
+        if not v.startswith("/"):
+            raise ValueError("export_path must start with /")
+        # CRITICAL: Must not conflict with PostgreSQL paths
+        if v.startswith("/pgbackrest"):
+            raise ValueError("export_path cannot use /pgbackrest (reserved for pgBackRest)")
+        if v.startswith("/pg-exports"):
+            raise ValueError("export_path cannot use /pg-exports (reserved for PostgreSQL exports)")
+        return v
+
+
 class SecurityConfig(BaseModel):
     """Security hardening configuration."""
 
@@ -177,6 +224,8 @@ class MachineConfig(BaseModel):
     pgbouncer: PgBouncerConfig = Field(default_factory=PgBouncerConfig)
     backup: BackupConfig = Field(default_factory=BackupConfig)
     export: ExportConfig = Field(default_factory=ExportConfig)
+    mongodb: MongoDBConfig = Field(default_factory=MongoDBConfig)
+    mongo_export: MongoExportConfig = Field(default_factory=MongoExportConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
 
@@ -266,6 +315,9 @@ class SecretsConfig(BaseSettings):
     # PostgreSQL superuser password (for initial setup)
     sm_pg_superuser_pass: Optional[str] = Field(None, alias="SM_PG_SUPERUSER_PASS")
 
+    # MongoDB admin password (for initial setup)
+    sm_mongo_admin_pass: Optional[str] = Field(None, alias="SM_MONGO_ADMIN_PASS")
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
@@ -322,6 +374,16 @@ class AppConfig:
     def export(self) -> ExportConfig:
         """Shortcut to export config."""
         return self._config.export
+
+    @property
+    def mongodb(self) -> MongoDBConfig:
+        """Shortcut to MongoDB config."""
+        return self._config.mongodb
+
+    @property
+    def mongo_export(self) -> MongoExportConfig:
+        """Shortcut to MongoDB export config."""
+        return self._config.mongo_export
 
     @property
     def security(self) -> SecurityConfig:
@@ -399,6 +461,20 @@ export:
   export_path: /pg-exports  # s3://bucket/pg-exports/
   compression_level: 6  # 0-9
   encrypt: true
+
+# MongoDB settings
+mongodb:
+  version: "7.0"
+  host: 127.0.0.1
+  port: 27017
+  auth_database: admin
+  # Credentials from environment:
+  #   SM_MONGO_ADMIN_PASS (for setup)
+
+# MongoDB export configuration (mongodump to S3)
+mongo_export:
+  export_path: /mongo-exports  # s3://bucket/mongo-exports/
+  compression: true
 
 # Security hardening
 security:

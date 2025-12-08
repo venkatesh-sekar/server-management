@@ -224,3 +224,14 @@ class FirewallError(SMError):
         super().__init__(message, hint=hint, details=details)
         self.rule = rule
         self.chain = chain
+
+
+class MongoDBError(SMError):
+    """MongoDB-specific errors.
+
+    Raised when:
+    - Cannot connect to MongoDB
+    - mongosh execution fails
+    - Database/user operations fail
+    """
+    exit_code = 16
