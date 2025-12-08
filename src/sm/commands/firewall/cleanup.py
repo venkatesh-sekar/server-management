@@ -99,12 +99,12 @@ def cleanup(
         total_removed = 0
 
         # Process INPUT chain
-        input_removed = _cleanup_chain(ctx, iptables, Chain.INPUT, dry_run)
+        input_removed = _cleanup_chain(ctx, iptables, Chain.INPUT, dry_run, verbose)
         total_removed += input_removed
 
         # Process DOCKER-USER chain if it exists
         if iptables.docker_user_chain_exists():
-            docker_removed = _cleanup_chain(ctx, iptables, Chain.DOCKER_USER, dry_run)
+            docker_removed = _cleanup_chain(ctx, iptables, Chain.DOCKER_USER, dry_run, verbose)
             total_removed += docker_removed
 
         if total_removed > 0:
@@ -135,7 +135,7 @@ def cleanup(
         _handle_error(e)
 
 
-def _cleanup_chain(ctx, iptables: IptablesService, chain: Chain, dry_run: bool) -> int:
+def _cleanup_chain(ctx, iptables: IptablesService, chain: Chain, dry_run: bool, verbose: int) -> int:
     """Clean up duplicate rules in a single chain.
 
     Args:
@@ -143,6 +143,7 @@ def _cleanup_chain(ctx, iptables: IptablesService, chain: Chain, dry_run: bool) 
         iptables: Iptables service
         chain: Chain to clean
         dry_run: Preview mode
+        verbose: Verbosity level
 
     Returns:
         Number of rules removed
@@ -173,7 +174,7 @@ def _cleanup_chain(ctx, iptables: IptablesService, chain: Chain, dry_run: bool) 
 
         if key in seen:
             duplicates.append(rule.num)
-            if ctx.verbose > 0 or dry_run:
+            if verbose > 0 or dry_run:
                 ctx.console.info(
                     f"  Duplicate: #{rule.num} {rule.target} "
                     f"{rule.protocol or 'all'}/{rule.port or '-'} "
@@ -202,7 +203,7 @@ def _cleanup_chain(ctx, iptables: IptablesService, chain: Chain, dry_run: bool) 
         )
         if result.returncode == 0:
             removed += 1
-            if ctx.verbose > 0:
+            if verbose > 0:
                 ctx.console.info(f"  Removed rule #{rule_num}")
         else:
             ctx.console.warn(f"  Failed to remove rule #{rule_num}")
