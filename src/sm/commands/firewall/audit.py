@@ -74,7 +74,10 @@ def audit(
     # Check if state file exists
     if not STATE_FILE.exists() and not dry_run:
         console.warn("No SM state file found")
-        console.hint("Run 'sm firewall sync' to create initial state, or 'sm firewall enable' to set up firewall")
+        console.hint(
+            "Run 'sm firewall enable' to set up firewall with state tracking, "
+            "or 'sm firewall audit --import' to import existing rules into SM state"
+        )
         if not import_unknown:
             raise typer.Exit(0)
 

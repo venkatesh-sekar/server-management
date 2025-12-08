@@ -19,7 +19,13 @@ from sm.core import (
     get_audit_logger,
     AuditEventType,
 )
-from sm.services.iptables import IptablesService, Protocol, detect_firewall_providers
+from sm.services.iptables import (
+    IptablesService,
+    Protocol,
+    Action,
+    FirewallRule,
+    detect_firewall_providers,
+)
 from sm.services.systemd import SystemdService
 from sm.services.firewall_services import (
     SERVICES,
@@ -433,33 +439,48 @@ class FirewallWizard:
             # Backup current rules
             self.iptables.backup(suffix="-pre-wizard")
 
-            # Ensure safety rules
-            self.iptables.ensure_loopback_allowed()
-            self.iptables.ensure_established_allowed()
-            self.iptables.ensure_ssh_allowed()
+            # Initialize state manager and set Docker awareness
+            if self.iptables.docker_detected():
+                self.iptables.state_manager.set_docker_aware(True)
 
-            # Apply selected services
+            # Apply selected services and save to state
             for svc in self.selected_services:
                 source_str = self.service_sources.get(svc.name, "anywhere")
                 source_cidrs = resolve_source(source_str)
 
                 for port_spec in svc.ports:
                     for cidr in source_cidrs:
-                        self.iptables.allow_port(
+                        rule = FirewallRule(
                             port=port_spec.port,
                             protocol=port_spec.protocol,
                             source=cidr,
+                            action=Action.ACCEPT,
                             comment=svc.display_name,
-                            rollback=rollback,
                         )
+                        self.iptables.add_rule(rule, rollback=rollback)
+                        # Save to state
+                        self.iptables.save_rule_to_state(rule)
 
                 self.ctx.console.step(f"Allowed {svc.display_name}")
 
-            # Set DROP policy
+            # Set DROP policy (includes safety rules: loopback, established, SSH, ICMP)
             self.iptables.set_default_policy("DROP")
 
-            # Save rules
+            # Save SSH rule to state as protected
+            ssh_rule = FirewallRule(
+                port=self.iptables.ssh_port,
+                protocol=Protocol.TCP,
+                source="0.0.0.0/0",
+                action=Action.ACCEPT,
+                comment="SSH always allowed (sm safety)",
+            )
+            self.iptables.save_rule_to_state(ssh_rule, protected=True)
+
+            # Save rules to persistent storage
             self.iptables.save()
+
+            # Save SM state file
+            self.iptables.state_manager.save()
 
             # Install persistence
             self.iptables.install_persistence()

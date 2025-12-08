@@ -551,25 +551,49 @@ def firewall_enable(
             # Backup current rules
             iptables.backup(suffix="-pre-enable")
 
-            # Ensure safety rules
-            iptables.ensure_loopback_allowed()
-            iptables.ensure_established_allowed()
-            iptables.ensure_ssh_allowed()
+            # Initialize state manager and set Docker awareness
+            if iptables.docker_detected():
+                iptables.state_manager.set_docker_aware(True)
 
-            # Apply presets
+            # Apply presets and save rules to state
             for preset_name in presets_to_apply:
-                iptables.apply_preset(preset_name, rollback=rollback)
+                preset = iptables.get_preset(preset_name)
+                for rule in preset.rules:
+                    iptables.add_rule(rule, rollback=rollback)
+                    # Save to state
+                    iptables.save_rule_to_state(rule)
 
-            # Apply custom ports
+            # Apply custom ports and save to state
             if allow:
                 for port in allow:
-                    iptables.allow_port(port, rollback=rollback)
+                    rule = FirewallRule(
+                        port=port,
+                        protocol=Protocol.TCP,
+                        source="0.0.0.0/0",
+                        action=Action.ACCEPT,
+                        comment=f"Allow TCP/{port}",
+                    )
+                    iptables.add_rule(rule, rollback=rollback)
+                    iptables.save_rule_to_state(rule)
 
-            # Set DROP policy
+            # Set DROP policy (includes safety rules: loopback, established, SSH, ICMP)
             iptables.set_default_policy("DROP")
 
-            # Save rules
+            # Save SSH rule to state as protected
+            ssh_rule = FirewallRule(
+                port=iptables.ssh_port,
+                protocol=Protocol.TCP,
+                source="0.0.0.0/0",
+                action=Action.ACCEPT,
+                comment="SSH always allowed (sm safety)",
+            )
+            iptables.save_rule_to_state(ssh_rule, protected=True)
+
+            # Save rules to persistent storage
             iptables.save()
+
+            # Save SM state file
+            iptables.state_manager.save()
 
             # Install persistence
             iptables.install_persistence()
@@ -677,8 +701,12 @@ def firewall_disable(
         # Flush and set ACCEPT
         iptables.flush(keep_ssh=True)
 
-        # Save rules
+        # Save rules to persistent storage
         iptables.save()
+
+        # Clear SM state (but keep protected rules like SSH)
+        iptables.state_manager.clear_rules(keep_protected=True)
+        iptables.state_manager.save()
 
         ctx.console.print()
         ctx.console.success("Firewall disabled")
@@ -879,14 +907,19 @@ def _allow_service(
     for port_spec in service.ports:
         rule_comment = comment or f"{service.display_name}"
         for cidr in source_cidrs:
-            iptables.allow_port(
+            rule = FirewallRule(
                 port=port_spec.port,
                 protocol=port_spec.protocol,
                 source=cidr,
+                action=Action.ACCEPT,
                 comment=rule_comment,
             )
+            iptables.add_rule(rule)
+            # Save to state
+            iptables.save_rule_to_state(rule)
 
     iptables.save()
+    iptables.state_manager.save()
 
     ctx.console.print()
     ctx.console.success(f"Allowed {service.display_name} from {source_display}")
@@ -928,14 +961,19 @@ def _allow_port(
 
     # Add rule for each source CIDR
     for cidr in source_cidrs:
-        iptables.allow_port(
+        rule = FirewallRule(
             port=port,
             protocol=proto,
             source=cidr,
-            comment=comment,
+            action=Action.ACCEPT,
+            comment=comment or f"Allow {proto.value.upper()}/{port}",
         )
+        iptables.add_rule(rule)
+        # Save to state
+        iptables.save_rule_to_state(rule)
 
     iptables.save()
+    iptables.state_manager.save()
 
     ctx.console.print()
     ctx.console.success(f"Allowed {protocol.upper()}/{port} from {source_display}")
@@ -1097,6 +1135,8 @@ def _deny_service(
                         action=Action.ACCEPT,
                     )
                     iptables.remove_rule(remove_rule)
+                    # Also remove from state
+                    iptables.remove_rule_from_state(remove_rule)
                     ctx.console.info(
                         f"Removed conflicting allow rule for {port_spec.protocol.value.upper()}/{port_spec.port}"
                     )
@@ -1107,14 +1147,19 @@ def _deny_service(
     for port_spec in service.ports:
         rule_comment = comment or f"Block {service.display_name}"
         for cidr in source_cidrs:
-            iptables.deny_port(
+            deny_rule = FirewallRule(
                 port=port_spec.port,
                 protocol=port_spec.protocol,
                 source=cidr,
+                action=Action.DROP,
                 comment=rule_comment,
             )
+            iptables.add_rule(deny_rule)
+            # Save to state
+            iptables.save_rule_to_state(deny_rule)
 
     iptables.save()
+    iptables.state_manager.save()
 
     ctx.console.print()
     ctx.console.success(f"Blocked {service.display_name} from {source_display}")
@@ -1178,6 +1223,8 @@ def _deny_port(
                     action=Action.ACCEPT,
                 )
                 iptables.remove_rule(remove_rule)
+                # Also remove from state
+                iptables.remove_rule_from_state(remove_rule)
                 ctx.console.info(f"Removed conflicting allow rule for {proto.value.upper()}/{port}")
             except Exception:
                 # Rule might not exist exactly as listed (e.g., different comment)
@@ -1186,14 +1233,19 @@ def _deny_port(
 
     # Add deny rule for each source CIDR
     for cidr in source_cidrs:
-        iptables.deny_port(
+        deny_rule = FirewallRule(
             port=port,
             protocol=proto,
             source=cidr,
-            comment=comment,
+            action=Action.DROP,
+            comment=comment or f"Block {proto.value.upper()}/{port}",
         )
+        iptables.add_rule(deny_rule)
+        # Save to state
+        iptables.save_rule_to_state(deny_rule)
 
     iptables.save()
+    iptables.state_manager.save()
 
     ctx.console.print()
     ctx.console.success(f"Blocked {protocol.upper()}/{port} from {source_display}")
@@ -1409,8 +1461,12 @@ def firewall_reset(
         # Flush all rules
         iptables.flush(keep_ssh=True, include_docker=include_docker)
 
-        # Save the clean state
+        # Save the clean state to persistent storage
         iptables.save()
+
+        # Clear SM state (all rules including protected)
+        iptables.state_manager.clear_rules(keep_protected=False)
+        iptables.state_manager.save()
 
         ctx.console.print()
         ctx.console.success("Firewall reset to default state")
