@@ -152,6 +152,36 @@ class FirewallStatus:
         return f"Firewall: {status}, Policy: {self.default_policy}"
 
 
+# Protocol number to name mapping
+PROTOCOL_NAMES = {
+    "0": "all",
+    "1": "icmp",
+    "6": "tcp",
+    "17": "udp",
+    "47": "gre",
+    "50": "esp",
+    "51": "ah",
+    "58": "icmpv6",
+    "all": "all",
+    "tcp": "tcp",
+    "udp": "udp",
+    "icmp": "icmp",
+    "icmpv6": "icmpv6",
+}
+
+
+def normalize_protocol(proto: str) -> str:
+    """Convert protocol number or name to friendly name.
+
+    Args:
+        proto: Protocol number (e.g., "6") or name (e.g., "tcp")
+
+    Returns:
+        Friendly protocol name (e.g., "tcp")
+    """
+    return PROTOCOL_NAMES.get(proto.lower(), proto)
+
+
 @dataclass
 class ParsedRule:
     """A rule parsed from iptables output."""
@@ -163,6 +193,32 @@ class ParsedRule:
     port: Optional[int] = None
     comment: Optional[str] = None
     extra: Optional[str] = None
+
+    @property
+    def is_chain_jump(self) -> bool:
+        """Check if this rule jumps to another chain (not a standard action)."""
+        standard_actions = {"ACCEPT", "DROP", "REJECT", "RETURN", "LOG", "MASQUERADE", "SNAT", "DNAT"}
+        return self.target not in standard_actions
+
+    @property
+    def display_action(self) -> str:
+        """Get user-friendly action display string."""
+        if self.is_chain_jump:
+            # Fail2ban chains
+            if self.target.startswith("f2b-") or self.target.startswith("fail2ban-"):
+                return f"{self.target}"
+            # Other chain jumps
+            return f"→{self.target}"
+        return self.target
+
+    @property
+    def action_description(self) -> str:
+        """Get description for chain jumps."""
+        if self.target.startswith("f2b-") or self.target.startswith("fail2ban-"):
+            return "Fail2ban intrusion prevention"
+        if self.is_chain_jump:
+            return f"Jump to {self.target} chain"
+        return ""
 
 
 # Built-in presets
@@ -883,7 +939,7 @@ class IptablesService:
                 rules.append(ParsedRule(
                     num=num,
                     target=target,
-                    protocol=protocol,
+                    protocol=normalize_protocol(protocol),
                     source=source,
                     destination=destination,
                     port=port,

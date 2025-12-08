@@ -316,7 +316,7 @@ def firewall_list(
         ctx.console.print("  [cyan]Proto[/cyan]    Protocol: tcp, udp, icmp, or all")
         ctx.console.print("  [cyan]Port[/cyan]     Port number (- means all ports)")
         ctx.console.print("  [cyan]Source[/cyan]   Who can connect: IP address or 0.0.0.0/0 (anyone)")
-        ctx.console.print("  [cyan]Action[/cyan]   [green]ACCEPT[/green] = allow traffic, [red]DROP[/red] = block silently, [red]REJECT[/red] = block with response")
+        ctx.console.print("  [cyan]Action[/cyan]   [green]ACCEPT[/green] = allow, [red]DROP[/red] = block silently, [yellow]f2b-*[/yellow] = fail2ban check")
         ctx.console.print()
 
         for chain_name in chains_to_list:
@@ -346,7 +346,16 @@ def firewall_list(
             table.add_column("Description", style="dim")
 
             for rule in rules:
-                action_color = "green" if rule.target == "ACCEPT" else "red"
+                # Determine action color based on target
+                if rule.target == "ACCEPT":
+                    action_color = "green"
+                elif rule.target in ("DROP", "REJECT"):
+                    action_color = "red"
+                elif rule.is_chain_jump:
+                    action_color = "yellow"  # Chain jumps in yellow
+                else:
+                    action_color = "dim"
+
                 port_str = str(rule.port) if rule.port else "-"
 
                 # Make source more readable
@@ -356,13 +365,16 @@ def firewall_list(
                 elif rule.source == "127.0.0.1" or rule.source == "127.0.0.0/8":
                     source_display = "localhost"
 
+                # Use action_description for chain jumps, otherwise use existing comment
+                description = rule.action_description or rule.comment or ""
+
                 table.add_row(
                     str(rule.num),
                     rule.protocol,
                     port_str,
                     source_display,
-                    f"[{action_color}]{rule.target}[/{action_color}]",
-                    rule.comment or "",
+                    f"[{action_color}]{rule.display_action}[/{action_color}]",
+                    description,
                 )
 
             ctx.console.print(table)
