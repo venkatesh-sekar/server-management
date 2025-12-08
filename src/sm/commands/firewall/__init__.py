@@ -851,6 +851,133 @@ def firewall_allow(
         _handle_error(e)
 
 
+def _remove_conflicting_rules(
+    ctx,
+    iptables: IptablesService,
+    port: int,
+    protocol: Protocol,
+    source_cidrs: list[str],
+    conflicting_action: Action,
+) -> int:
+    """Remove conflicting rules for a port/protocol/source combination.
+
+    When allowing a port, we remove any DROP rules for the same traffic.
+    When blocking a port, we remove any ACCEPT rules for the same traffic.
+
+    This prevents having both ACCEPT and DROP rules for the same traffic,
+    which is confusing even though iptables processes rules in order.
+
+    Args:
+        ctx: Execution context
+        iptables: Iptables service
+        port: Port number
+        protocol: Protocol
+        source_cidrs: List of source CIDRs to check
+        conflicting_action: The action to remove (DROP when allowing, ACCEPT when blocking)
+
+    Returns:
+        Number of rules removed
+    """
+    if ctx.dry_run:
+        return 0
+
+    total_removed = 0
+    is_anywhere = "0.0.0.0/0" in source_cidrs
+
+    # Process INPUT chain
+    removed = _remove_conflicting_from_chain(
+        ctx, iptables, Chain.INPUT, port, protocol, source_cidrs, is_anywhere, conflicting_action
+    )
+    total_removed += removed
+
+    # Process DOCKER-USER chain if it exists
+    if iptables.docker_user_chain_exists():
+        removed = _remove_conflicting_from_chain(
+            ctx, iptables, Chain.DOCKER_USER, port, protocol, source_cidrs, is_anywhere, conflicting_action
+        )
+        total_removed += removed
+
+    return total_removed
+
+
+def _remove_conflicting_from_chain(
+    ctx,
+    iptables: IptablesService,
+    chain: Chain,
+    port: int,
+    protocol: Protocol,
+    source_cidrs: list[str],
+    is_anywhere: bool,
+    conflicting_action: Action,
+) -> int:
+    """Remove conflicting rules from a specific chain.
+
+    Args:
+        ctx: Execution context
+        iptables: Iptables service
+        chain: Chain to process
+        port: Port number
+        protocol: Protocol
+        source_cidrs: List of source CIDRs to check
+        is_anywhere: Whether the source is "anywhere" (0.0.0.0/0)
+        conflicting_action: The action to remove
+
+    Returns:
+        Number of rules removed
+    """
+    existing_rules = iptables.list_rules(chain)
+    removed = 0
+
+    # Determine target string to match
+    if conflicting_action == Action.DROP:
+        target_matches = ("DROP", "REJECT")
+    else:
+        target_matches = ("ACCEPT",)
+
+    for rule in existing_rules:
+        # Match port
+        if rule.port != port:
+            continue
+
+        # Match protocol
+        rule_proto = (rule.protocol or "tcp").lower()
+        if rule_proto != protocol.value.lower():
+            continue
+
+        # Match action
+        if rule.target not in target_matches:
+            continue
+
+        # Match source - if allowing from "anywhere", remove ALL conflicting rules
+        # If allowing from specific source, only remove matching source rules
+        rule_source = rule.source or "0.0.0.0/0"
+        if not is_anywhere and rule_source not in source_cidrs and rule_source != "0.0.0.0/0":
+            continue
+
+        # Skip chain jumps (like fail2ban)
+        if rule.is_chain_jump:
+            continue
+
+        # Found a conflicting rule - remove it
+        try:
+            remove_rule = FirewallRule(
+                port=rule.port,
+                protocol=Protocol(rule_proto),
+                source=rule_source,
+                action=conflicting_action,
+                chain=chain,
+            )
+            iptables.remove_rule(remove_rule, ipv6=True)
+            iptables.remove_rule_from_state(remove_rule)
+            ctx.console.info(f"Removed conflicting {rule.target} rule for {rule_proto.upper()}/{port}")
+            removed += 1
+        except Exception:
+            # Rule might not exist exactly as listed
+            pass
+
+    return removed
+
+
 def _allow_service(
     ctx,
     iptables: IptablesService,
@@ -902,6 +1029,11 @@ def _allow_service(
 
     # Backup before making changes
     iptables.backup(suffix="-pre-allow")
+
+    # Remove any conflicting DROP rules for this service's ports
+    # This prevents having both ACCEPT and DROP rules for the same traffic
+    for port_spec in service.ports:
+        _remove_conflicting_rules(ctx, iptables, port_spec.port, port_spec.protocol, source_cidrs, Action.DROP)
 
     # Add rules for each port and source CIDR
     for port_spec in service.ports:
@@ -958,6 +1090,10 @@ def _allow_port(
 
     # Backup before making changes
     iptables.backup(suffix="-pre-allow")
+
+    # Remove any conflicting DROP rules for this port/protocol/source
+    # This prevents having both ACCEPT and DROP rules for the same traffic
+    _remove_conflicting_rules(ctx, iptables, port, proto, source_cidrs, Action.DROP)
 
     # Add rule for each source CIDR
     for cidr in source_cidrs:
@@ -1792,8 +1928,10 @@ from sm.commands.firewall.sync import sync as sync_command
 from sm.commands.firewall.exclusive import exclusive as exclusive_command
 from sm.commands.firewall.audit import audit as audit_command
 from sm.commands.firewall.cleanup import cleanup as cleanup_command
+from sm.commands.firewall.remove import remove as remove_command
 
 app.command("sync")(sync_command)
 app.command("exclusive")(exclusive_command)
 app.command("audit")(audit_command)
 app.command("cleanup")(cleanup_command)
+app.command("remove")(remove_command)
