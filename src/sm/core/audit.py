@@ -80,6 +80,16 @@ class AuditEventType(Enum):
     MIGRATE_DATABASE = "migrate.database"
     MIGRATE_CLUSTER = "migrate.cluster"
 
+    # Firewall operations
+    FIREWALL_ENABLE = "firewall.enable"
+    FIREWALL_DISABLE = "firewall.disable"
+    FIREWALL_RULE_ADD = "firewall.rule_add"
+    FIREWALL_RULE_REMOVE = "firewall.rule_remove"
+    FIREWALL_PRESET_APPLY = "firewall.preset_apply"
+    FIREWALL_SAVE = "firewall.save"
+    FIREWALL_RESTORE = "firewall.restore"
+    FIREWALL_RESET = "firewall.reset"
+
 
 class AuditResult(Enum):
     """Result of an audited operation."""

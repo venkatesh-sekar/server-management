@@ -71,6 +71,7 @@ from sm.commands.postgres.backup import app as postgres_backup_app
 from sm.commands.postgres.restore import app as postgres_restore_app
 from sm.commands.postgres.migrate import app as postgres_migrate_app
 from sm.commands.docker import app as docker_commands_app
+from sm.commands.firewall import app as firewall_app
 
 # Register postgres sub-commands
 postgres_app.add_typer(postgres_user_app, name="user")
@@ -86,6 +87,7 @@ app.add_typer(security_app, name="security")
 app.add_typer(observability_app, name="observability")
 app.add_typer(config_app, name="config")
 app.add_typer(docker_commands_app, name="docker")
+app.add_typer(firewall_app, name="firewall")
 
 
 # Type aliases for common options

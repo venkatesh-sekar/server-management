@@ -13,6 +13,7 @@ from sm.core.exceptions import (
     CredentialError,
     ServiceError,
     RollbackError,
+    FirewallError,
 )
 
 from sm.core.context import ExecutionContext, create_context
@@ -46,6 +47,7 @@ __all__ = [
     "CredentialError",
     "ServiceError",
     "RollbackError",
+    "FirewallError",
     # Context
     "ExecutionContext",
     "create_context",

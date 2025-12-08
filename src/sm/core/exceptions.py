@@ -199,3 +199,28 @@ class CredentialError(SMError):
     - Cannot read credential file
     """
     exit_code = 14
+
+
+class FirewallError(SMError):
+    """Firewall/iptables errors.
+
+    Raised when:
+    - iptables command fails
+    - Rule validation fails
+    - Cannot persist rules
+    - Docker chain operations fail
+    """
+    exit_code = 15
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        rule: Optional[str] = None,
+        chain: Optional[str] = None,
+        hint: Optional[str] = None,
+        details: Optional[list[str]] = None,
+    ) -> None:
+        super().__init__(message, hint=hint, details=details)
+        self.rule = rule
+        self.chain = chain
