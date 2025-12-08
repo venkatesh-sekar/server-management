@@ -393,41 +393,52 @@ class SecurityAuditService:
 
         # Update apt cache
         self.ctx.console.info("Updating apt cache...")
-        result = subprocess.run(
-            ["apt-get", "update", "-y"],
-            capture_output=True,
-            text=True,
-            env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},
-        )
-        if result.returncode != 0:
-            self.ctx.console.warn("Failed to update apt cache")
+        try:
+            result = subprocess.run(
+                ["apt-get", "update", "-y"],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},
+            )
+            if result.returncode != 0:
+                self.ctx.console.warn("Failed to update apt cache")
+        except FileNotFoundError:
+            self.ctx.console.warn("apt-get not found - cannot install tools")
+            return installed
 
         # Install tools
         self.ctx.console.info(f"Installing: {', '.join(tools_to_install)}")
-        result = subprocess.run(
-            ["apt-get", "install", "-y", "--no-install-recommends"] + tools_to_install,
-            capture_output=True,
-            text=True,
-            env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},
-        )
-        if result.returncode == 0:
-            installed = tools_to_install
-        else:
-            self.ctx.console.warn(f"Some tools failed to install: {result.stderr}")
+        try:
+            result = subprocess.run(
+                ["apt-get", "install", "-y", "--no-install-recommends"] + tools_to_install,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},
+            )
+            if result.returncode == 0:
+                installed = tools_to_install
+            else:
+                self.ctx.console.warn(f"Some tools failed to install: {result.stderr}")
+        except FileNotFoundError:
+            self.ctx.console.warn("apt-get not found - cannot install tools")
+            return installed
 
         # Update rkhunter database if installed
         if "rkhunter" in tools_to_install:
             self.ctx.console.info("Updating rkhunter database...")
-            subprocess.run(
-                ["rkhunter", "--update"],
-                capture_output=True,
-                text=True,
-            )
-            subprocess.run(
-                ["rkhunter", "--propupd"],
-                capture_output=True,
-                text=True,
-            )
+            try:
+                subprocess.run(
+                    ["rkhunter", "--update"],
+                    capture_output=True,
+                    text=True,
+                )
+                subprocess.run(
+                    ["rkhunter", "--propupd"],
+                    capture_output=True,
+                    text=True,
+                )
+            except FileNotFoundError:
+                self.ctx.console.warn("rkhunter not found after install - skipping database update")
 
         return installed
 
@@ -439,11 +450,22 @@ class SecurityAuditService:
         """
         available: dict[str, bool] = {}
         for tool_name, tool_info in EXTERNAL_TOOLS.items():
-            result = subprocess.run(
-                ["which", tool_info["check_cmd"][0]],
-                capture_output=True,
-            )
-            available[tool_name] = result.returncode == 0
+            try:
+                result = subprocess.run(
+                    ["which", tool_info["check_cmd"][0]],
+                    capture_output=True,
+                )
+                available[tool_name] = result.returncode == 0
+            except FileNotFoundError:
+                # 'which' command not available, try direct execution check
+                try:
+                    result = subprocess.run(
+                        tool_info["check_cmd"],
+                        capture_output=True,
+                    )
+                    available[tool_name] = result.returncode == 0
+                except FileNotFoundError:
+                    available[tool_name] = False
         return available
 
     # ==================== Network Checks ====================
@@ -692,12 +714,18 @@ class SecurityAuditService:
     def _check_firewall(self) -> AuditFinding:
         """Check if firewall is enabled."""
         # Try ufw first
-        result = subprocess.run(
-            ["ufw", "status"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
+        try:
+            result = subprocess.run(
+                ["ufw", "status"],
+                capture_output=True,
+                text=True,
+            )
+            ufw_available = True
+        except FileNotFoundError:
+            ufw_available = False
+            result = None
+
+        if ufw_available and result and result.returncode == 0:
             if "Status: active" in result.stdout:
                 return AuditFinding(
                     check_id="FW-001",
@@ -718,22 +746,28 @@ class SecurityAuditService:
                 )
 
         # Try iptables
-        result = subprocess.run(
-            ["iptables", "-L", "-n"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            # Check if there are any rules beyond default
-            lines = [l for l in result.stdout.splitlines() if l and not l.startswith("Chain") and not l.startswith("target")]
-            if len(lines) > 0:
-                return AuditFinding(
-                    check_id="FW-001",
-                    check_name="Firewall status",
-                    severity=AuditSeverity.PASS,
-                    message="iptables has active rules",
-                    category="network",
-                )
+        try:
+            result = subprocess.run(
+                ["iptables", "-L", "-n"],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                # Check if there are any rules beyond default
+                lines = [
+                    line for line in result.stdout.splitlines()
+                    if line and not line.startswith("Chain") and not line.startswith("target")
+                ]
+                if len(lines) > 0:
+                    return AuditFinding(
+                        check_id="FW-001",
+                        check_name="Firewall status",
+                        severity=AuditSeverity.PASS,
+                        message="iptables has active rules",
+                        category="network",
+                    )
+        except FileNotFoundError:
+            pass  # iptables not installed
 
         return AuditFinding(
             check_id="FW-001",
