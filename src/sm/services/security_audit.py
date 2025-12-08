@@ -1095,7 +1095,7 @@ class SecurityAuditService:
 
         # SUID/SGID (skip in quick mode - slow)
         if not quick:
-            with self.ctx.console.console.status(
+            with self.ctx.console.status(
                 "[bold blue]Scanning for SUID/SGID binaries...[/bold blue]",
                 spinner="dots",
             ):
@@ -1103,7 +1103,7 @@ class SecurityAuditService:
 
         # World-writable files in sensitive dirs (skip in quick mode)
         if not quick:
-            with self.ctx.console.console.status(
+            with self.ctx.console.status(
                 "[bold blue]Scanning for world-writable files...[/bold blue]",
                 spinner="dots",
             ):
@@ -1495,7 +1495,7 @@ class SecurityAuditService:
 
         # Run Lynis
         if available.get("lynis"):
-            with self.ctx.console.console.status(
+            with self.ctx.console.status(
                 "[bold blue]Running Lynis audit (this may take a few minutes)...[/bold blue]",
                 spinner="dots",
             ):
@@ -1506,7 +1506,7 @@ class SecurityAuditService:
 
         # Run rkhunter
         if available.get("rkhunter"):
-            with self.ctx.console.console.status(
+            with self.ctx.console.status(
                 "[bold blue]Running rkhunter scan (this may take several minutes)...[/bold blue]",
                 spinner="dots",
             ):
@@ -1517,7 +1517,7 @@ class SecurityAuditService:
 
         # Run chkrootkit
         if available.get("chkrootkit"):
-            with self.ctx.console.console.status(
+            with self.ctx.console.status(
                 "[bold blue]Running chkrootkit scan...[/bold blue]",
                 spinner="dots",
             ):

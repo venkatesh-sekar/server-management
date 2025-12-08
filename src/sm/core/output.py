@@ -191,6 +191,18 @@ class Console:
             console=self._console,
         )
 
+    def status(self, message: str, spinner: str = "dots") -> Any:
+        """Get a status context manager with spinner.
+
+        Args:
+            message: Status message to display
+            spinner: Spinner animation name (default: dots)
+
+        Returns:
+            Rich Status context manager
+        """
+        return self._console.status(message, spinner=spinner)
+
     # User input
     def input(self, prompt: str) -> str:
         """Get text input from user.
