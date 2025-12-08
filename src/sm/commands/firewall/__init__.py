@@ -187,7 +187,29 @@ def firewall_status(
 
         # Show what's allowed
         rules = iptables.list_rules(Chain.INPUT)
-        accept_rules = [r for r in rules if r.target == "ACCEPT" and r.port]
+
+        # Find ports that are blocked (DROP rule comes before any ACCEPT for that port)
+        # Rules are processed in order - first matching rule wins
+        blocked_ports: set[tuple[int, str]] = set()  # (port, protocol)
+        seen_ports: set[tuple[int, str]] = set()
+        for rule in rules:
+            if not rule.port:
+                continue
+            port_key = (rule.port, (rule.protocol or "tcp").lower())
+            if port_key in seen_ports:
+                continue
+            seen_ports.add(port_key)
+            # First rule for this port determines if it's blocked or allowed
+            if rule.target == "DROP":
+                blocked_ports.add(port_key)
+
+        # Filter ACCEPT rules, excluding ports that have a DROP rule first
+        accept_rules = [
+            r for r in rules
+            if r.target == "ACCEPT"
+            and r.port
+            and (r.port, (r.protocol or "tcp").lower()) not in blocked_ports
+        ]
 
         if accept_rules:
             ctx.console.print("[bold]Allowed Traffic:[/bold]")
@@ -222,6 +244,24 @@ def firewall_status(
                 ssh_marker = " [dim][protected][/dim]" if is_ssh else ""
 
                 ctx.console.print(f"  {name:30} from {source_display}{ssh_marker}")
+
+            ctx.console.print()
+
+        # Show explicitly blocked ports (if any DROP rules exist)
+        drop_rules = [r for r in rules if r.target == "DROP" and r.port]
+        if drop_rules:
+            ctx.console.print("[bold]Blocked Traffic:[/bold]")
+            ctx.console.print()
+
+            displayed_blocked: set[int] = set()
+            for rule in drop_rules:
+                if rule.port in displayed_blocked:
+                    continue
+                displayed_blocked.add(rule.port)
+
+                name = f"Port {rule.port}/{rule.protocol or 'tcp'}"
+                source_display = format_source_for_display(rule.source)
+                ctx.console.print(f"  {name:30} from {source_display}")
 
             ctx.console.print()
 
@@ -1029,6 +1069,34 @@ def _deny_service(
     # Backup before making changes
     iptables.backup(suffix="-pre-deny")
 
+    # Remove conflicting ACCEPT rules for each port
+    existing_rules = iptables.list_rules(Chain.INPUT)
+    is_anywhere = source_str == "anywhere" or "0.0.0.0/0" in source_cidrs
+
+    for port_spec in service.ports:
+        for rule in existing_rules:
+            if rule.port != port_spec.port:
+                continue
+            if rule.target != "ACCEPT":
+                continue
+            rule_proto = (rule.protocol or "tcp").lower()
+            if rule_proto != port_spec.protocol.value.lower():
+                continue
+            if is_anywhere or rule.source in source_cidrs or rule.source == "0.0.0.0/0":
+                try:
+                    remove_rule = FirewallRule(
+                        port=rule.port,
+                        protocol=Protocol(rule_proto),
+                        source=rule.source or "0.0.0.0/0",
+                        action=Action.ACCEPT,
+                    )
+                    iptables.remove_rule(remove_rule)
+                    ctx.console.info(
+                        f"Removed conflicting allow rule for {port_spec.protocol.value.upper()}/{port_spec.port}"
+                    )
+                except Exception:
+                    pass
+
     # Add deny rules for each port and source CIDR
     for port_spec in service.ports:
         rule_comment = comment or f"Block {service.display_name}"
@@ -1076,6 +1144,39 @@ def _deny_port(
 
     # Backup before making changes
     iptables.backup(suffix="-pre-deny")
+
+    # Remove conflicting ACCEPT rules for the same port/protocol
+    # When blocking from "anywhere", remove ALL accept rules for this port
+    # When blocking from specific source, only remove matching accept rules
+    existing_rules = iptables.list_rules(Chain.INPUT)
+    is_anywhere = source_str == "anywhere" or "0.0.0.0/0" in source_cidrs
+
+    for rule in existing_rules:
+        if rule.port != port:
+            continue
+        if rule.target != "ACCEPT":
+            continue
+        # Normalize protocol for comparison
+        rule_proto = (rule.protocol or "tcp").lower()
+        if rule_proto != proto.value.lower():
+            continue
+        # If blocking from anywhere, remove all ACCEPT rules
+        # If blocking from specific source, only remove matching source
+        if is_anywhere or rule.source in source_cidrs or rule.source == "0.0.0.0/0":
+            try:
+                # Create a FirewallRule to remove
+                remove_rule = FirewallRule(
+                    port=rule.port,
+                    protocol=Protocol(rule_proto),
+                    source=rule.source or "0.0.0.0/0",
+                    action=Action.ACCEPT,
+                )
+                iptables.remove_rule(remove_rule)
+                ctx.console.info(f"Removed conflicting allow rule for {proto.value.upper()}/{port}")
+            except Exception:
+                # Rule might not exist exactly as listed (e.g., different comment)
+                # This is not critical - the DROP rule will still take precedence
+                pass
 
     # Add deny rule for each source CIDR
     for cidr in source_cidrs:
