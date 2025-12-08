@@ -17,7 +17,9 @@ from sm.core import (
     create_context,
     CommandExecutor,
     get_audit_logger,
+    AuditEvent,
     AuditEventType,
+    AuditResult,
 )
 from sm.services.iptables import IptablesService
 from sm.services.systemd import SystemdService
@@ -232,11 +234,12 @@ def _import_rules(report, iptables: IptablesService, ctx) -> None:
 
         # Log to audit
         audit_logger = get_audit_logger()
-        audit_logger.log(
-            AuditEventType.CONFIG_CHANGE,
-            "firewall_audit_import",
-            details={"rules_imported": imported},
-        )
+        audit_logger.log(AuditEvent(
+            event_type=AuditEventType.FIREWALL_IMPORT,
+            result=AuditResult.SUCCESS,
+            operation="firewall_audit_import",
+            parameters={"rules_imported": imported},
+        ))
 
         ctx.console.success(f"Imported {imported} rule(s) to SM state")
     else:

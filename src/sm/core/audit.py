@@ -89,6 +89,9 @@ class AuditEventType(Enum):
     FIREWALL_SAVE = "firewall.save"
     FIREWALL_RESTORE = "firewall.restore"
     FIREWALL_RESET = "firewall.reset"
+    FIREWALL_SYNC = "firewall.sync"
+    FIREWALL_EXCLUSIVE = "firewall.exclusive"
+    FIREWALL_IMPORT = "firewall.import"
 
 
 class AuditResult(Enum):

@@ -18,7 +18,9 @@ from sm.core import (
     create_context,
     CommandExecutor,
     get_audit_logger,
+    AuditEvent,
     AuditEventType,
+    AuditResult,
 )
 from sm.services.iptables import IptablesService
 from sm.services.systemd import SystemdService
@@ -107,11 +109,12 @@ def sync(
 
         # Log to audit
         audit = get_audit_logger()
-        audit.log(
-            AuditEventType.CONFIG_CHANGE,
-            "firewall_sync",
-            details={"rules_applied": applied, "boot_mode": boot},
-        )
+        audit.log(AuditEvent(
+            event_type=AuditEventType.FIREWALL_SYNC,
+            result=AuditResult.SUCCESS,
+            operation="firewall_sync",
+            parameters={"rules_applied": applied, "boot_mode": boot},
+        ))
 
     except Exception as e:
         console.error(f"Sync failed: {e}")

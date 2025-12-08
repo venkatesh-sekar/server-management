@@ -31,7 +31,7 @@ from sm.core.safety import (
     check_not_protected_user,
 )
 from sm.core.credentials import CredentialManager, get_credential_manager
-from sm.core.audit import AuditLogger, AuditEventType, AuditResult, get_audit_logger
+from sm.core.audit import AuditLogger, AuditEvent, AuditEventType, AuditResult, get_audit_logger
 from sm.core.executor import CommandExecutor, RollbackStack
 
 __all__ = [
@@ -74,6 +74,7 @@ __all__ = [
     "get_credential_manager",
     # Audit
     "AuditLogger",
+    "AuditEvent",
     "AuditEventType",
     "AuditResult",
     "get_audit_logger",

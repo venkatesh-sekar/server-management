@@ -15,7 +15,9 @@ from sm.core import (
     create_context,
     CommandExecutor,
     get_audit_logger,
+    AuditEvent,
     AuditEventType,
+    AuditResult,
 )
 from sm.services.iptables import IptablesService, detect_firewall_providers
 from sm.services.systemd import SystemdService
@@ -193,14 +195,15 @@ def _enable_exclusive(iptables: IptablesService, systemd: SystemdService, ctx) -
     iptables.state_manager.save()
 
     # Log to audit
-    audit.log(
-        AuditEventType.CONFIG_CHANGE,
-        "firewall_exclusive_enabled",
-        details={
+    audit.log(AuditEvent(
+        event_type=AuditEventType.FIREWALL_EXCLUSIVE,
+        result=AuditResult.SUCCESS,
+        operation="firewall_exclusive_enabled",
+        parameters={
             "ufw_was_active": provider_status.ufw_active,
             "firewalld_was_active": provider_status.firewalld_active,
         },
-    )
+    ))
 
     ctx.console.success("Exclusive mode enabled - SM is now the only firewall manager")
     ctx.console.hint("Other firewall tools have been masked and cannot be started")
@@ -226,10 +229,11 @@ def _disable_exclusive(iptables: IptablesService, systemd: SystemdService, ctx) 
     iptables.state_manager.save()
 
     # Log to audit
-    audit.log(
-        AuditEventType.CONFIG_CHANGE,
-        "firewall_exclusive_disabled",
-    )
+    audit.log(AuditEvent(
+        event_type=AuditEventType.FIREWALL_EXCLUSIVE,
+        result=AuditResult.SUCCESS,
+        operation="firewall_exclusive_disabled",
+    ))
 
     ctx.console.success("Exclusive mode disabled")
     ctx.console.warn("UFW and firewalld are unmasked but not enabled")
