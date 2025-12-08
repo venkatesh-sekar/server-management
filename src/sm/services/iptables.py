@@ -7,8 +7,11 @@ Provides safe interface for managing iptables firewall rules with:
 - Persistence via iptables-persistent
 - Dry-run mode support
 - Rollback on failure
+- State management (SM as source of truth)
+- Fail2ban chain preservation
 """
 
+import fnmatch
 import os
 import re
 import shutil
@@ -24,6 +27,12 @@ from sm.core.executor import CommandExecutor, RollbackStack
 from sm.core.exceptions import FirewallError, ValidationError
 from sm.services.network import DEFAULT_INTERNAL_CIDRS, detect_internal_networks, validate_cidr
 from sm.services.systemd import SystemdService
+from sm.services.firewall_state import (
+    FirewallStateManager,
+    StoredRule,
+    DriftReport,
+    STATE_FILE,
+)
 
 
 # Constants
@@ -437,7 +446,12 @@ class IptablesService:
     - Persistence via iptables-persistent
     - Dry-run mode support
     - Rollback on failure
+    - State management (SM as source of truth)
+    - Fail2ban chain preservation
     """
+
+    # Fail2ban chain patterns to preserve
+    FAIL2BAN_CHAIN_PATTERNS = ["f2b-*", "fail2ban-*"]
 
     def __init__(
         self,
@@ -473,6 +487,16 @@ class IptablesService:
         self._internal_cidrs: Optional[list[str]] = None
         self._ipv6_ssh_rule_ok: bool = False  # Track IPv6 SSH rule success
         self._provider_status: Optional[FirewallProviderStatus] = None
+
+        # State management
+        self._state_manager: Optional[FirewallStateManager] = None
+
+    @property
+    def state_manager(self) -> FirewallStateManager:
+        """Get lazy-initialized state manager."""
+        if self._state_manager is None:
+            self._state_manager = FirewallStateManager(self.ctx)
+        return self._state_manager
 
     # =========================================================================
     # Detection Methods
@@ -1438,3 +1462,401 @@ class IptablesService:
             )
 
         return result
+
+    # =========================================================================
+    # Fail2ban Integration
+    # =========================================================================
+
+    def _is_fail2ban_chain(self, chain_name: str) -> bool:
+        """Check if a chain name matches fail2ban patterns.
+
+        Args:
+            chain_name: Name of the chain
+
+        Returns:
+            True if chain is a fail2ban chain
+        """
+        for pattern in self.FAIL2BAN_CHAIN_PATTERNS:
+            if fnmatch.fnmatch(chain_name, pattern):
+                return True
+        return False
+
+    def get_fail2ban_chains(self) -> list[str]:
+        """Get list of fail2ban chains in iptables.
+
+        Returns:
+            List of chain names starting with f2b- or fail2ban-
+        """
+        if self.ctx.dry_run:
+            return []
+
+        result = self._run_iptables(["-L", "-n"], check=False)
+        if result.returncode != 0:
+            return []
+
+        chains = []
+        for line in result.stdout.splitlines():
+            if line.startswith("Chain "):
+                # Format: "Chain f2b-sshd (1 references)"
+                parts = line.split()
+                if len(parts) >= 2:
+                    chain_name = parts[1]
+                    if self._is_fail2ban_chain(chain_name):
+                        chains.append(chain_name)
+
+        return chains
+
+    def get_fail2ban_jump_rules(self, chain: str = "INPUT") -> list[dict]:
+        """Get rules that jump to fail2ban chains.
+
+        Args:
+            chain: Chain to check (default INPUT)
+
+        Returns:
+            List of dicts with rule info (num, target, etc.)
+        """
+        if self.ctx.dry_run:
+            return []
+
+        result = self._run_iptables(
+            ["-L", chain, "-n", "--line-numbers"],
+            check=False,
+        )
+        if result.returncode != 0:
+            return []
+
+        rules = []
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    num = int(parts[0])
+                    target = parts[1]
+                    if self._is_fail2ban_chain(target):
+                        rules.append({
+                            "num": num,
+                            "target": target,
+                            "line": line,
+                        })
+                except ValueError:
+                    continue
+
+        return rules
+
+    def _restore_fail2ban_jump_rule(self, target: str) -> None:
+        """Restore a fail2ban jump rule in INPUT chain.
+
+        Args:
+            target: The fail2ban chain to jump to (e.g., f2b-sshd)
+        """
+        # Check if rule already exists
+        result = self._run_iptables(
+            ["-C", "INPUT", "-j", target],
+            check=False,
+        )
+        if result.returncode != 0:
+            # Rule doesn't exist, add it
+            self._run_iptables(["-I", "INPUT", "-j", target], check=False)
+
+    # =========================================================================
+    # State Management and Sync
+    # =========================================================================
+
+    def save_rule_to_state(
+        self,
+        rule: "FirewallRule",
+        *,
+        protected: bool = False,
+    ) -> bool:
+        """Save a rule to SM state.
+
+        Args:
+            rule: FirewallRule to save
+            protected: Whether rule is protected (cannot be removed)
+
+        Returns:
+            True if rule was added to state, False if already exists
+        """
+        stored = StoredRule(
+            port=rule.port,
+            protocol=rule.protocol.value if hasattr(rule.protocol, 'value') else rule.protocol,
+            source=rule.source,
+            destination=rule.destination,
+            action=rule.action.value if hasattr(rule.action, 'value') else rule.action,
+            chain=rule.chain.value if hasattr(rule.chain, 'value') else rule.chain,
+            comment=rule.comment,
+            interface=rule.interface,
+            protected=protected or (rule.port == self.ssh_port and rule.action == Action.ACCEPT),
+        )
+        return self.state_manager.add_rule(stored)
+
+    def remove_rule_from_state(self, rule: "FirewallRule") -> bool:
+        """Remove a rule from SM state.
+
+        Args:
+            rule: FirewallRule to remove
+
+        Returns:
+            True if rule was removed, False if not found
+        """
+        stored = StoredRule(
+            port=rule.port,
+            protocol=rule.protocol.value if hasattr(rule.protocol, 'value') else rule.protocol,
+            source=rule.source,
+            destination=rule.destination,
+            action=rule.action.value if hasattr(rule.action, 'value') else rule.action,
+            chain=rule.chain.value if hasattr(rule.chain, 'value') else rule.chain,
+            comment=rule.comment,
+            interface=rule.interface,
+        )
+        return self.state_manager.remove_rule(stored)
+
+    def sync_state_to_iptables(self, *, quiet: bool = False) -> int:
+        """Apply SM state rules to iptables.
+
+        This is idempotent - rules that already exist are skipped.
+
+        Args:
+            quiet: Suppress non-error output
+
+        Returns:
+            Number of rules applied
+        """
+        applied = 0
+        state = self.state_manager.state
+
+        # Update Docker awareness
+        if self.docker_detected():
+            self.state_manager.set_docker_aware(True)
+
+        for stored_rule in state.rules:
+            # Convert StoredRule to FirewallRule
+            rule = FirewallRule(
+                port=stored_rule.port,
+                protocol=Protocol(stored_rule.protocol) if stored_rule.protocol != "all" else Protocol.ALL,
+                source=stored_rule.source,
+                destination=stored_rule.destination,
+                action=Action(stored_rule.action),
+                chain=Chain(stored_rule.chain) if stored_rule.chain in [c.value for c in Chain] else Chain.INPUT,
+                comment=stored_rule.comment,
+                interface=stored_rule.interface,
+            )
+
+            # Check if rule already exists
+            if not self.rule_exists(rule):
+                if not quiet:
+                    self.ctx.console.step(f"Syncing rule: {stored_rule}")
+
+                if self.ctx.dry_run:
+                    self.ctx.console.dry_run_msg(f"Would add rule: {stored_rule}")
+                else:
+                    self.add_rule(rule, skip_if_exists=True)
+                applied += 1
+
+        return applied
+
+    def detect_drift(self) -> DriftReport:
+        """Detect rules in iptables not managed by SM state.
+
+        Returns:
+            DriftReport with unknown, missing, and preserved rules
+        """
+        report = DriftReport()
+
+        if self.ctx.dry_run:
+            return report
+
+        # Get current iptables rules
+        current_rules = self.list_rules(Chain.INPUT)
+
+        # Get fail2ban chains for exclusion
+        f2b_chains = self.get_fail2ban_chains()
+
+        # Check each iptables rule against SM state
+        for parsed in current_rules:
+            # Skip system rules (ACCEPT all, RETURN, etc.)
+            if parsed.target in ("RETURN", "LOG"):
+                continue
+
+            # Check if this is a fail2ban jump
+            if self._is_fail2ban_chain(parsed.target):
+                report.preserved_rules.append({
+                    "num": parsed.num,
+                    "target": parsed.target,
+                    "type": "fail2ban",
+                })
+                continue
+
+            # Skip conntrack/state rules
+            if parsed.extra and "ctstate" in parsed.extra.lower():
+                continue
+
+            # Skip loopback rules
+            if parsed.extra and "-i lo" in (parsed.extra or ""):
+                continue
+
+            # Create a StoredRule to check against state
+            stored = StoredRule(
+                port=parsed.port,
+                protocol=parsed.protocol,
+                source=parsed.source,
+                action=parsed.target,
+                chain="INPUT",
+                comment=parsed.comment,
+            )
+
+            if not self.state_manager.state.has_rule(stored):
+                report.unknown_rules.append({
+                    "num": parsed.num,
+                    "target": parsed.target,
+                    "protocol": parsed.protocol,
+                    "port": parsed.port,
+                    "source": parsed.source,
+                    "comment": parsed.comment,
+                })
+
+        # Check for rules in state that are missing from iptables
+        for stored_rule in self.state_manager.state.rules:
+            rule = FirewallRule(
+                port=stored_rule.port,
+                protocol=Protocol(stored_rule.protocol) if stored_rule.protocol != "all" else Protocol.ALL,
+                source=stored_rule.source,
+                action=Action(stored_rule.action),
+                chain=Chain(stored_rule.chain) if stored_rule.chain in [c.value for c in Chain] else Chain.INPUT,
+            )
+            if not self.rule_exists(rule):
+                report.missing_rules.append(stored_rule)
+
+        return report
+
+    def flush_with_fail2ban_preservation(
+        self,
+        *,
+        keep_ssh: bool = True,
+        include_docker: bool = False,
+    ) -> None:
+        """Flush rules while preserving fail2ban chains and jump rules.
+
+        Args:
+            keep_ssh: Re-add SSH allow rule after flush (safety)
+            include_docker: Also flush DOCKER-USER chain
+        """
+        self.ctx.console.step("Flushing firewall rules (preserving fail2ban)")
+
+        if self.ctx.dry_run:
+            self.ctx.console.dry_run_msg("Would flush INPUT (preserving fail2ban jumps)")
+            return
+
+        # Get fail2ban jump rules before flush
+        f2b_jumps = self.get_fail2ban_jump_rules("INPUT")
+        f2b_targets = [r["target"] for r in f2b_jumps]
+
+        # Flush INPUT
+        self._run_iptables(["-F", "INPUT"])
+        self._run_ip6tables(["-F", "INPUT"], check=False)
+
+        # Restore fail2ban jump rules
+        for target in f2b_targets:
+            self.ctx.console.debug(f"Restoring fail2ban jump: {target}")
+            self._restore_fail2ban_jump_rule(target)
+
+        # Flush DOCKER-USER if requested
+        if include_docker and self.docker_user_chain_exists():
+            self.ctx.console.step("Flushing DOCKER-USER chain")
+            self._run_iptables(["-F", "DOCKER-USER"], check=False)
+            self._run_iptables(["-A", "DOCKER-USER", "-j", "RETURN"], check=False)
+
+        # Set policy to ACCEPT
+        self._run_iptables(["-P", "INPUT", "ACCEPT"])
+        self._run_ip6tables(["-P", "INPUT", "ACCEPT"], check=False)
+
+        # Re-add SSH rule for safety
+        if keep_ssh:
+            self.ensure_ssh_allowed()
+
+        self.ctx.console.success("Firewall rules flushed (fail2ban preserved)")
+
+    # =========================================================================
+    # Systemd Hooks for Docker Integration
+    # =========================================================================
+
+    def install_systemd_hooks(self) -> None:
+        """Install systemd service and Docker drop-in for rule persistence.
+
+        This ensures:
+        1. Rules are applied at boot
+        2. Rules are reapplied when Docker restarts
+        """
+        # Service content for boot-time sync
+        service_content = """[Unit]
+Description=SM Firewall Manager
+After=network.target
+# Wait for Docker if it exists (but don't fail if it doesn't)
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/sm firewall sync --boot --quiet
+ExecReload=/usr/local/bin/sm firewall sync --quiet
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+        # Docker drop-in content
+        docker_dropin_content = """# Generated by SM - ensures firewall rules persist after Docker restarts
+[Service]
+ExecStartPost=/usr/local/bin/sm firewall sync --quiet
+"""
+
+        self.ctx.console.step("Installing SM firewall systemd hooks")
+
+        # Install main service
+        self.systemd.install_service(
+            "sm-firewall",
+            service_content,
+            enable=True,
+            start=False,
+            description="Installing SM firewall boot service",
+        )
+
+        # Install Docker drop-in if Docker is present
+        if self.docker_detected() or self.systemd.exists("docker.service"):
+            self.systemd.install_drop_in(
+                "docker.service",
+                "sm-firewall",
+                docker_dropin_content,
+                description="Installing Docker restart hook for firewall",
+            )
+            self.systemd.daemon_reload()
+
+        # Update state
+        self.state_manager.set_systemd_installed(True)
+        self.state_manager.save()
+
+        self.ctx.console.success("Systemd hooks installed")
+
+    def remove_systemd_hooks(self) -> None:
+        """Remove systemd service and Docker drop-in."""
+        self.ctx.console.step("Removing SM firewall systemd hooks")
+
+        # Remove Docker drop-in
+        self.systemd.remove_drop_in(
+            "docker.service",
+            "sm-firewall",
+            description="Removing Docker restart hook",
+        )
+
+        # Remove service
+        self.systemd.remove_service(
+            "sm-firewall",
+            description="Removing SM firewall boot service",
+        )
+
+        # Update state
+        self.state_manager.set_systemd_installed(False)
+        self.state_manager.save()
+
+        self.ctx.console.success("Systemd hooks removed")

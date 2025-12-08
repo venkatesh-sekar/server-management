@@ -5,6 +5,9 @@ Provides comprehensive iptables firewall management with:
 - SSH always-allow safety mechanism
 - Preset profiles (web, postgres, docker-swarm)
 - Rule persistence across reboots
+- State management (SM as source of truth)
+- Fail2ban coexistence
+- Exclusive mode (disable other firewall tools)
 """
 
 import os
@@ -1561,3 +1564,17 @@ def firewall_services(
     ctx.console.print()
     ctx.console.print("[dim]You can also use IP addresses or CIDR notation (e.g., 10.0.0.0/8)[/dim]")
     ctx.console.print()
+
+
+# =============================================================================
+# New Commands: sync, exclusive, audit
+# =============================================================================
+
+# Import new commands and add them to the app
+from sm.commands.firewall.sync import sync as sync_command
+from sm.commands.firewall.exclusive import exclusive as exclusive_command
+from sm.commands.firewall.audit import audit as audit_command
+
+app.command("sync")(sync_command)
+app.command("exclusive")(exclusive_command)
+app.command("audit")(audit_command)

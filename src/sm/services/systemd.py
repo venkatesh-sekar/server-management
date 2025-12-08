@@ -4,11 +4,16 @@ Provides a safe interface for managing systemd services.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from sm.core.context import ExecutionContext
 from sm.core.executor import CommandExecutor
 from sm.core.exceptions import ServiceError
+
+
+# Standard systemd paths
+SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
 
 
 @dataclass
@@ -341,3 +346,292 @@ class SystemdService:
                     group = val
 
         return (user, group)
+
+    def is_masked(self, service: str) -> bool:
+        """Check if a service is masked.
+
+        Args:
+            service: Service name
+
+        Returns:
+            True if service is masked
+        """
+        if self.ctx.dry_run:
+            return False
+
+        result = self.executor.run(
+            ["systemctl", "is-enabled", service],
+            check=False,
+        )
+        return result.stdout.strip() == "masked"
+
+    def mask(
+        self,
+        service: str,
+        *,
+        description: Optional[str] = None,
+    ) -> None:
+        """Mask a service to prevent it from starting.
+
+        Masking creates a symlink to /dev/null, preventing the service
+        from being started manually or automatically.
+
+        Args:
+            service: Service name
+            description: Optional description for logging
+        """
+        desc = description or f"Masking {service}"
+        self.ctx.console.step(desc)
+
+        if self.ctx.dry_run:
+            self.ctx.console.dry_run_msg(f"systemctl mask {service}")
+            return
+
+        self.executor.run(["systemctl", "mask", service])
+
+    def unmask(
+        self,
+        service: str,
+        *,
+        description: Optional[str] = None,
+    ) -> None:
+        """Unmask a previously masked service.
+
+        This removes the mask but does not enable or start the service.
+
+        Args:
+            service: Service name
+            description: Optional description for logging
+        """
+        desc = description or f"Unmasking {service}"
+        self.ctx.console.step(desc)
+
+        if self.ctx.dry_run:
+            self.ctx.console.dry_run_msg(f"systemctl unmask {service}")
+            return
+
+        self.executor.run(["systemctl", "unmask", service])
+
+    def install_drop_in(
+        self,
+        service: str,
+        drop_in_name: str,
+        content: str,
+        *,
+        description: Optional[str] = None,
+    ) -> Path:
+        """Install a systemd drop-in configuration file.
+
+        Drop-in files extend or override service configurations.
+        They are placed in /etc/systemd/system/<service>.d/<name>.conf
+
+        Args:
+            service: Service name (e.g., "docker.service")
+            drop_in_name: Name for the drop-in file (without .conf)
+            content: Content of the drop-in file
+            description: Optional description for logging
+
+        Returns:
+            Path to the created drop-in file
+        """
+        # Ensure service name has .service suffix for directory
+        if not service.endswith(".service"):
+            service = f"{service}.service"
+
+        drop_in_dir = SYSTEMD_SYSTEM_DIR / f"{service}.d"
+        drop_in_path = drop_in_dir / f"{drop_in_name}.conf"
+
+        desc = description or f"Installing drop-in {drop_in_name} for {service}"
+        self.ctx.console.step(desc)
+
+        if self.ctx.dry_run:
+            self.ctx.console.dry_run_msg(f"Would create {drop_in_path}")
+            return drop_in_path
+
+        # Create drop-in directory if it doesn't exist
+        drop_in_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write drop-in file
+        with open(drop_in_path, "w") as f:
+            f.write(content)
+
+        self.ctx.console.debug(f"Created drop-in: {drop_in_path}")
+        return drop_in_path
+
+    def remove_drop_in(
+        self,
+        service: str,
+        drop_in_name: str,
+        *,
+        description: Optional[str] = None,
+    ) -> bool:
+        """Remove a systemd drop-in configuration file.
+
+        Args:
+            service: Service name (e.g., "docker.service")
+            drop_in_name: Name of the drop-in file (without .conf)
+            description: Optional description for logging
+
+        Returns:
+            True if file was removed, False if it didn't exist
+        """
+        if not service.endswith(".service"):
+            service = f"{service}.service"
+
+        drop_in_dir = SYSTEMD_SYSTEM_DIR / f"{service}.d"
+        drop_in_path = drop_in_dir / f"{drop_in_name}.conf"
+
+        desc = description or f"Removing drop-in {drop_in_name} from {service}"
+        self.ctx.console.step(desc)
+
+        if self.ctx.dry_run:
+            self.ctx.console.dry_run_msg(f"Would remove {drop_in_path}")
+            return drop_in_path.exists()
+
+        if not drop_in_path.exists():
+            return False
+
+        drop_in_path.unlink()
+
+        # Remove directory if empty
+        try:
+            drop_in_dir.rmdir()
+        except OSError:
+            pass  # Directory not empty
+
+        return True
+
+    def install_service(
+        self,
+        name: str,
+        content: str,
+        *,
+        enable: bool = True,
+        start: bool = False,
+        description: Optional[str] = None,
+    ) -> Path:
+        """Install a systemd service unit file.
+
+        Creates the service file in /etc/systemd/system/ and optionally
+        enables/starts it.
+
+        Args:
+            name: Service name (e.g., "sm-firewall" or "sm-firewall.service")
+            content: Content of the service file
+            enable: Whether to enable the service after installation
+            start: Whether to start the service after installation
+            description: Optional description for logging
+
+        Returns:
+            Path to the created service file
+        """
+        # Ensure name has .service suffix
+        if not name.endswith(".service"):
+            name = f"{name}.service"
+
+        service_path = SYSTEMD_SYSTEM_DIR / name
+
+        desc = description or f"Installing service {name}"
+        self.ctx.console.step(desc)
+
+        if self.ctx.dry_run:
+            self.ctx.console.dry_run_msg(f"Would create {service_path}")
+            if enable:
+                self.ctx.console.dry_run_msg(f"Would enable {name}")
+            if start:
+                self.ctx.console.dry_run_msg(f"Would start {name}")
+            return service_path
+
+        # Write service file
+        with open(service_path, "w") as f:
+            f.write(content)
+
+        self.ctx.console.debug(f"Created service: {service_path}")
+
+        # Reload daemon to pick up new service
+        self.daemon_reload()
+
+        # Enable if requested
+        if enable:
+            self.enable(name, start=start, description=f"Enabling {name}")
+
+        return service_path
+
+    def remove_service(
+        self,
+        name: str,
+        *,
+        description: Optional[str] = None,
+    ) -> bool:
+        """Remove a systemd service unit file.
+
+        Stops, disables, and removes the service file.
+
+        Args:
+            name: Service name (e.g., "sm-firewall" or "sm-firewall.service")
+            description: Optional description for logging
+
+        Returns:
+            True if service was removed, False if it didn't exist
+        """
+        if not name.endswith(".service"):
+            name = f"{name}.service"
+
+        service_path = SYSTEMD_SYSTEM_DIR / name
+
+        desc = description or f"Removing service {name}"
+        self.ctx.console.step(desc)
+
+        if self.ctx.dry_run:
+            self.ctx.console.dry_run_msg(f"Would stop and disable {name}")
+            self.ctx.console.dry_run_msg(f"Would remove {service_path}")
+            return service_path.exists()
+
+        if not service_path.exists():
+            return False
+
+        # Stop if running
+        if self.is_active(name):
+            self.stop(name, description=f"Stopping {name}")
+
+        # Disable if enabled
+        if self.is_enabled(name):
+            self.disable(name, description=f"Disabling {name}")
+
+        # Remove file
+        service_path.unlink()
+
+        # Reload daemon
+        self.daemon_reload()
+
+        return True
+
+    def drop_in_exists(self, service: str, drop_in_name: str) -> bool:
+        """Check if a drop-in file exists.
+
+        Args:
+            service: Service name
+            drop_in_name: Name of the drop-in file (without .conf)
+
+        Returns:
+            True if drop-in file exists
+        """
+        if not service.endswith(".service"):
+            service = f"{service}.service"
+
+        drop_in_path = SYSTEMD_SYSTEM_DIR / f"{service}.d" / f"{drop_in_name}.conf"
+        return drop_in_path.exists()
+
+    def service_file_exists(self, name: str) -> bool:
+        """Check if a service file exists in /etc/systemd/system/.
+
+        Args:
+            name: Service name
+
+        Returns:
+            True if service file exists
+        """
+        if not name.endswith(".service"):
+            name = f"{name}.service"
+
+        return (SYSTEMD_SYSTEM_DIR / name).exists()

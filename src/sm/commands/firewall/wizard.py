@@ -19,7 +19,7 @@ from sm.core import (
     get_audit_logger,
     AuditEventType,
 )
-from sm.services.iptables import IptablesService, Protocol
+from sm.services.iptables import IptablesService, Protocol, detect_firewall_providers
 from sm.services.systemd import SystemdService
 from sm.services.firewall_services import (
     SERVICES,
@@ -83,6 +83,10 @@ class FirewallWizard:
         self.service_sources: dict[str, str] = {}  # service_name -> source
         self.custom_ports: list[tuple[int, str]] = []  # (port, source)
 
+        # New options
+        self.enable_exclusive_mode: bool = False
+        self.install_systemd_hooks: bool = False
+
     def run(self) -> None:
         """Run the interactive wizard."""
         self._check_root()
@@ -102,11 +106,14 @@ class FirewallWizard:
         # Step 3: Configure sources for each service
         self._configure_sources()
 
-        # Step 4: Review and confirm
+        # Step 4: Advanced options (exclusive mode, systemd hooks)
+        self._configure_advanced_options(server_type)
+
+        # Step 5: Review and confirm
         if not self._review_configuration():
             return
 
-        # Step 5: Apply
+        # Step 6: Apply
         self._apply_configuration()
 
     def _check_root(self) -> None:
@@ -317,9 +324,59 @@ class FirewallWizard:
                 self.service_sources[svc.name] = default
                 break
 
+    def _configure_advanced_options(self, server_type: str) -> None:
+        """Configure advanced options like exclusive mode and systemd hooks."""
+        self.ctx.console.print("[bold]Step 4: Advanced Options[/bold]")
+        self.ctx.console.print()
+
+        # Check for other firewall providers
+        providers = detect_firewall_providers()
+        has_other_providers = providers.ufw_installed or providers.firewalld_installed
+        has_docker = self.systemd.exists("docker.service")
+
+        # Exclusive mode
+        if has_other_providers:
+            self.ctx.console.print("  [bold]Other firewall tools detected:[/bold]")
+            if providers.ufw_installed:
+                status = "[red]Active[/red]" if providers.ufw_active else "[dim]Inactive[/dim]"
+                self.ctx.console.print(f"    - UFW: {status}")
+            if providers.firewalld_installed:
+                status = "[red]Active[/red]" if providers.firewalld_active else "[dim]Inactive[/dim]"
+                self.ctx.console.print(f"    - firewalld: {status}")
+            self.ctx.console.print()
+
+            self.ctx.console.print("  [bold]Exclusive Mode[/bold]")
+            self.ctx.console.print("  [dim]Disables and masks UFW/firewalld so only SM manages the firewall.[/dim]")
+            self.ctx.console.print("  [dim]This prevents conflicts and accidental rule changes.[/dim]")
+            self.ctx.console.print()
+
+            self.enable_exclusive_mode = self.ctx.console.confirm(
+                "Enable exclusive mode (recommended)?",
+                default=True,
+            )
+            self.ctx.console.print()
+
+        # Docker integration (systemd hooks)
+        if has_docker or server_type == "docker":
+            self.ctx.console.print("  [bold]Docker Integration[/bold]")
+            self.ctx.console.print("  [dim]When Docker restarts, it recreates its firewall chains.[/dim]")
+            self.ctx.console.print("  [dim]Installing systemd hooks ensures SM rules persist after Docker restarts.[/dim]")
+            self.ctx.console.print()
+
+            self.install_systemd_hooks = self.ctx.console.confirm(
+                "Install systemd hooks for Docker persistence (recommended)?",
+                default=True,
+            )
+            self.ctx.console.print()
+
+        # If no prompts were shown, show a brief message
+        if not has_other_providers and not has_docker and server_type != "docker":
+            self.ctx.console.print("  [dim]No advanced options needed for this configuration.[/dim]")
+            self.ctx.console.print()
+
     def _review_configuration(self) -> bool:
         """Show configuration review and confirm."""
-        self.ctx.console.print("[bold]Step 4: Review Configuration[/bold]")
+        self.ctx.console.print("[bold]Step 5: Review Configuration[/bold]")
         self.ctx.console.print()
 
         # Build summary table
@@ -348,6 +405,15 @@ class FirewallWizard:
 
         self.ctx.console.print(table)
         self.ctx.console.print()
+
+        # Show advanced options if any are enabled
+        if self.enable_exclusive_mode or self.install_systemd_hooks:
+            self.ctx.console.print("[bold]Advanced Options:[/bold]")
+            if self.enable_exclusive_mode:
+                self.ctx.console.print("  - [green]Exclusive mode[/green]: Will disable UFW/firewalld")
+            if self.install_systemd_hooks:
+                self.ctx.console.print("  - [green]Systemd hooks[/green]: Will persist rules across Docker restarts")
+            self.ctx.console.print()
 
         if self.dry_run:
             self.ctx.console.print("[blue][DRY-RUN][/blue] Would apply this configuration")
@@ -398,18 +464,40 @@ class FirewallWizard:
             # Install persistence
             self.iptables.install_persistence()
 
+            # Enable exclusive mode if selected
+            if self.enable_exclusive_mode:
+                self.ctx.console.step("Enabling exclusive mode")
+                self._enable_exclusive_mode()
+
+            # Install systemd hooks if selected
+            if self.install_systemd_hooks:
+                self.ctx.console.step("Installing systemd hooks")
+                self.iptables.install_systemd_hooks()
+
             self.ctx.console.print()
             self.ctx.console.success("Firewall configured successfully!")
             self.ctx.console.print()
+
+            # Show relevant hints
             self.ctx.console.hint("Use 'sm firewall status' to see current configuration")
+            if self.enable_exclusive_mode:
+                self.ctx.console.hint("Exclusive mode enabled - UFW/firewalld are now disabled and masked")
+            if self.install_systemd_hooks:
+                self.ctx.console.hint("Systemd hooks installed - rules will persist across Docker restarts")
 
             # Log audit event
             services_str = ", ".join(s.name for s in self.selected_services) or "ssh-only"
+            extras = []
+            if self.enable_exclusive_mode:
+                extras.append("exclusive_mode")
+            if self.install_systemd_hooks:
+                extras.append("systemd_hooks")
+            extras_str = f" ({', '.join(extras)})" if extras else ""
             self.audit.log_success(
                 AuditEventType.FIREWALL_ENABLE,
                 "firewall",
                 "wizard",
-                message=f"Firewall configured via wizard: {services_str}",
+                message=f"Firewall configured via wizard: {services_str}{extras_str}",
             )
 
         except SMError as e:
@@ -423,3 +511,33 @@ class FirewallWizard:
                 self.ctx.console.warn("Rolling back changes...")
                 rollback.rollback_all()
             raise
+
+    def _enable_exclusive_mode(self) -> None:
+        """Enable exclusive mode by disabling and masking other firewall tools."""
+        import subprocess
+
+        providers = detect_firewall_providers()
+
+        # Stop and mask UFW if installed
+        if providers.ufw_installed:
+            if providers.ufw_active:
+                # UFW has its own disable command
+                if not self.dry_run:
+                    subprocess.run(["ufw", "disable"], capture_output=True)
+
+            if not self.systemd.is_masked("ufw"):
+                self.systemd.disable("ufw", stop=True, description="Disabling UFW")
+                self.systemd.mask("ufw", description="Masking UFW")
+
+        # Stop and mask firewalld if installed
+        if providers.firewalld_installed:
+            if providers.firewalld_active:
+                self.systemd.stop("firewalld", description="Stopping firewalld")
+
+            if not self.systemd.is_masked("firewalld"):
+                self.systemd.disable("firewalld", stop=True, description="Disabling firewalld")
+                self.systemd.mask("firewalld", description="Masking firewalld")
+
+        # Update state
+        self.iptables.state_manager.set_exclusive_mode(True)
+        self.iptables.state_manager.save()
