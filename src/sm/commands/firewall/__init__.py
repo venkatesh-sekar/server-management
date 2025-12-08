@@ -1104,7 +1104,11 @@ def _deny_service(
     source_str: str,
     comment: Optional[str],
 ) -> None:
-    """Block a service."""
+    """Block a service.
+
+    Since default policy is DROP, blocking just means removing any ACCEPT rules.
+    No explicit DROP rules are needed (that would be redundant).
+    """
     # Resolve source to CIDRs
     source_cidrs = resolve_source(source_str)
     source_def = get_source_definition(source_str)
@@ -1113,9 +1117,10 @@ def _deny_service(
     # Backup before making changes
     iptables.backup(suffix="-pre-deny")
 
-    # Remove conflicting ACCEPT rules for each port
+    # Remove ACCEPT rules for each port
     existing_rules = iptables.list_rules(Chain.INPUT)
     is_anywhere = source_str == "anywhere" or "0.0.0.0/0" in source_cidrs
+    removed_any = False
 
     for port_spec in service.ports:
         for rule in existing_rules:
@@ -1138,31 +1143,25 @@ def _deny_service(
                     # Also remove from state
                     iptables.remove_rule_from_state(remove_rule)
                     ctx.console.info(
-                        f"Removed conflicting allow rule for {port_spec.protocol.value.upper()}/{port_spec.port}"
+                        f"Removed allow rule for {port_spec.protocol.value.upper()}/{port_spec.port}"
                     )
+                    removed_any = True
                 except Exception:
                     pass
 
-    # Add deny rules for each port and source CIDR
-    for port_spec in service.ports:
-        rule_comment = comment or f"Block {service.display_name}"
-        for cidr in source_cidrs:
-            deny_rule = FirewallRule(
-                port=port_spec.port,
-                protocol=port_spec.protocol,
-                source=cidr,
-                action=Action.DROP,
-                comment=rule_comment,
-            )
-            iptables.add_rule(deny_rule)
-            # Save to state
-            iptables.save_rule_to_state(deny_rule)
+    # No need to add explicit DROP rules - default policy is DROP
+    # Traffic to these ports is now blocked by default
 
     iptables.save()
     iptables.state_manager.save()
 
     ctx.console.print()
-    ctx.console.success(f"Blocked {service.display_name} from {source_display}")
+    if removed_any:
+        ctx.console.success(f"Blocked {service.display_name} from {source_display}")
+        ctx.console.info("Removed ACCEPT rules - traffic now blocked by default policy")
+    else:
+        ctx.console.success(f"{service.display_name} is already blocked (no ACCEPT rules found)")
+        ctx.console.info("Default policy is DROP - all non-allowed traffic is blocked")
 
     audit.log_success(
         AuditEventType.FIREWALL_RULE_ADD,
@@ -1181,7 +1180,11 @@ def _deny_port(
     source_str: str,
     comment: Optional[str],
 ) -> None:
-    """Block a single port."""
+    """Block a single port.
+
+    Since default policy is DROP, blocking just means removing any ACCEPT rules.
+    No explicit DROP rule is needed (that would be redundant).
+    """
     # Resolve source to CIDRs
     source_cidrs = resolve_source(source_str)
     source_def = get_source_definition(source_str)
@@ -1196,11 +1199,12 @@ def _deny_port(
     # Backup before making changes
     iptables.backup(suffix="-pre-deny")
 
-    # Remove conflicting ACCEPT rules for the same port/protocol
+    # Remove ACCEPT rules for the same port/protocol
     # When blocking from "anywhere", remove ALL accept rules for this port
     # When blocking from specific source, only remove matching accept rules
     existing_rules = iptables.list_rules(Chain.INPUT)
     is_anywhere = source_str == "anywhere" or "0.0.0.0/0" in source_cidrs
+    removed_any = False
 
     for rule in existing_rules:
         if rule.port != port:
@@ -1225,30 +1229,25 @@ def _deny_port(
                 iptables.remove_rule(remove_rule)
                 # Also remove from state
                 iptables.remove_rule_from_state(remove_rule)
-                ctx.console.info(f"Removed conflicting allow rule for {proto.value.upper()}/{port}")
+                ctx.console.info(f"Removed allow rule for {proto.value.upper()}/{port}")
+                removed_any = True
             except Exception:
                 # Rule might not exist exactly as listed (e.g., different comment)
-                # This is not critical - the DROP rule will still take precedence
                 pass
 
-    # Add deny rule for each source CIDR
-    for cidr in source_cidrs:
-        deny_rule = FirewallRule(
-            port=port,
-            protocol=proto,
-            source=cidr,
-            action=Action.DROP,
-            comment=comment or f"Block {proto.value.upper()}/{port}",
-        )
-        iptables.add_rule(deny_rule)
-        # Save to state
-        iptables.save_rule_to_state(deny_rule)
+    # No need to add explicit DROP rules - default policy is DROP
+    # Traffic to this port is now blocked by default
 
     iptables.save()
     iptables.state_manager.save()
 
     ctx.console.print()
-    ctx.console.success(f"Blocked {protocol.upper()}/{port} from {source_display}")
+    if removed_any:
+        ctx.console.success(f"Blocked {protocol.upper()}/{port} from {source_display}")
+        ctx.console.info("Removed ACCEPT rules - traffic now blocked by default policy")
+    else:
+        ctx.console.success(f"{protocol.upper()}/{port} is already blocked (no ACCEPT rules found)")
+        ctx.console.info("Default policy is DROP - all non-allowed traffic is blocked")
 
     audit.log_success(
         AuditEventType.FIREWALL_RULE_ADD,
@@ -1792,7 +1791,9 @@ def firewall_services(
 from sm.commands.firewall.sync import sync as sync_command
 from sm.commands.firewall.exclusive import exclusive as exclusive_command
 from sm.commands.firewall.audit import audit as audit_command
+from sm.commands.firewall.cleanup import cleanup as cleanup_command
 
 app.command("sync")(sync_command)
 app.command("exclusive")(exclusive_command)
 app.command("audit")(audit_command)
+app.command("cleanup")(cleanup_command)

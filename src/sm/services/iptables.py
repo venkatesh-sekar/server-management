@@ -1063,15 +1063,111 @@ class IptablesService:
     # Safety Mechanisms
     # =========================================================================
 
+    def _remove_duplicate_rules_by_match(
+        self,
+        chain: str,
+        match_args: list[str],
+        *,
+        keep_first: bool = True,
+        ipv4: bool = True,
+        ipv6: bool = True,
+    ) -> int:
+        """Remove duplicate rules matching given criteria, optionally keeping the first.
+
+        Args:
+            chain: Chain name (e.g., "INPUT")
+            match_args: Arguments to match rules (e.g., ["-p", "tcp", "--dport", "22", "-j", "ACCEPT"])
+            keep_first: If True, keep the first matching rule; if False, remove all
+            ipv4: Remove from IPv4 tables
+            ipv6: Remove from IPv6 tables
+
+        Returns:
+            Number of rules removed
+        """
+        if self.ctx.dry_run:
+            return 0
+
+        removed = 0
+
+        # Process IPv4
+        if ipv4:
+            removed += self._remove_duplicates_from_table(
+                self._run_iptables, chain, match_args, keep_first
+            )
+
+        # Process IPv6
+        if ipv6:
+            removed += self._remove_duplicates_from_table(
+                self._run_ip6tables, chain, match_args, keep_first
+            )
+
+        return removed
+
+    def _remove_duplicates_from_table(
+        self,
+        run_func,
+        chain: str,
+        match_args: list[str],
+        keep_first: bool,
+    ) -> int:
+        """Remove duplicate rules from a specific table.
+
+        Args:
+            run_func: Function to run iptables commands (_run_iptables or _run_ip6tables)
+            chain: Chain name
+            match_args: Arguments to match rules
+            keep_first: If True, keep the first matching rule
+
+        Returns:
+            Number of rules removed
+        """
+        removed = 0
+        found_first = False
+
+        # Keep removing matching rules until none left (or just first if keep_first=True)
+        while True:
+            # Check if rule exists
+            result = run_func(["-C", chain] + match_args, check=False)
+            if result.returncode != 0:
+                break  # No more matching rules
+
+            if keep_first and not found_first:
+                found_first = True
+                # Don't remove the first one, but we need to check if there are more
+                # Remove it temporarily, check for another, then re-add if needed
+                # Actually, simpler: after finding first, keep deleting until gone
+                continue
+
+            # Delete the rule
+            result = run_func(["-D", chain] + match_args, check=False)
+            if result.returncode == 0:
+                removed += 1
+            else:
+                break  # Failed to delete, stop trying
+
+            # Safety limit
+            if removed > 50:
+                break
+
+        return removed
+
     def ensure_ssh_allowed(self) -> None:
         """Ensure SSH is always allowed (safety mechanism).
 
         This is called before any policy change to prevent lockout.
+        Removes any duplicate SSH rules first, keeping only one.
         """
         if self.ctx.dry_run:
             self.ctx.console.dry_run_msg(f"Ensure SSH port {self.ssh_port} is allowed")
             self._ipv6_ssh_rule_ok = True  # Assume OK in dry-run
             return
+
+        ssh_rule_args = [
+            "-p", "tcp", "--dport", str(self.ssh_port), "-j", "ACCEPT",
+        ]
+
+        # Remove duplicates first (keep at most one)
+        self._remove_duplicate_rules_by_match("INPUT", ssh_rule_args, keep_first=True)
 
         if not self._check_ssh_rule_exists():
             self.ctx.console.step(f"Ensuring SSH port {self.ssh_port} is allowed (safety)")
@@ -1103,10 +1199,20 @@ class IptablesService:
             self._ipv6_ssh_rule_ok = result.returncode == 0
 
     def ensure_established_allowed(self) -> None:
-        """Ensure established/related connections are allowed."""
+        """Ensure established/related connections are allowed.
+
+        Removes any duplicate established connection rules first, keeping only one.
+        """
         if self.ctx.dry_run:
             self.ctx.console.dry_run_msg("Ensure established connections allowed")
             return
+
+        established_rule_args = [
+            "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT",
+        ]
+
+        # Remove duplicates first (keep at most one)
+        self._remove_duplicate_rules_by_match("INPUT", established_rule_args, keep_first=True)
 
         # Check if rule exists
         result = self._run_iptables([
@@ -1132,10 +1238,18 @@ class IptablesService:
             ], check=False)
 
     def ensure_loopback_allowed(self) -> None:
-        """Ensure loopback interface is allowed."""
+        """Ensure loopback interface is allowed.
+
+        Removes any duplicate loopback rules first, keeping only one.
+        """
         if self.ctx.dry_run:
             self.ctx.console.dry_run_msg("Ensure loopback allowed")
             return
+
+        loopback_rule_args = ["-i", "lo", "-j", "ACCEPT"]
+
+        # Remove duplicates first (keep at most one)
+        self._remove_duplicate_rules_by_match("INPUT", loopback_rule_args, keep_first=True)
 
         # Check if rule exists
         result = self._run_iptables([
@@ -1165,6 +1279,8 @@ class IptablesService:
         - Time exceeded (type 11)
         - Parameter problem (type 12)
         - Ping/echo request (type 8) - optional but useful
+
+        Removes any duplicate ICMP rules first, keeping only one of each type.
         """
         if self.ctx.dry_run:
             self.ctx.console.dry_run_msg("Ensure essential ICMP allowed")
@@ -1181,6 +1297,11 @@ class IptablesService:
 
         added_any = False
         for icmp_type, name in icmp_types:
+            icmp_rule_args = ["-p", "icmp", "--icmp-type", icmp_type, "-j", "ACCEPT"]
+
+            # Remove duplicates first (keep at most one) - IPv4 only
+            self._remove_duplicate_rules_by_match("INPUT", icmp_rule_args, keep_first=True, ipv6=False)
+
             # Check if this specific ICMP type rule exists
             check_result = self._run_iptables([
                 "-C", "INPUT", "-p", "icmp", "--icmp-type", icmp_type, "-j", "ACCEPT",
@@ -1212,6 +1333,11 @@ class IptablesService:
         ]
 
         for icmpv6_type, name in icmpv6_types:
+            icmpv6_rule_args = ["-p", "icmpv6", "--icmpv6-type", icmpv6_type, "-j", "ACCEPT"]
+
+            # Remove duplicates first (keep at most one) - IPv6 only
+            self._remove_duplicate_rules_by_match("INPUT", icmpv6_rule_args, keep_first=True, ipv4=False)
+
             # Check if this specific ICMPv6 type rule exists
             check_result = self._run_ip6tables([
                 "-C", "INPUT", "-p", "icmpv6", "--icmpv6-type", icmpv6_type, "-j", "ACCEPT",
