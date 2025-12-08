@@ -5,6 +5,7 @@ comprehensive security assessment of the system.
 """
 
 import os
+from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
@@ -21,6 +22,10 @@ from sm.services.security_audit import (
     AuditSeverity,
     SECURITY_CHECKS,
 )
+
+# Auto-save configuration
+AUDIT_REPORT_DIR = Path("/var/log/sm/security")
+MAX_AUDIT_REPORTS = 30
 
 
 def audit(
@@ -79,6 +84,14 @@ def audit(
             help="Disable colored output",
         ),
     ] = False,
+    output: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--output",
+            "-o",
+            help="Save full report to file (plain text with all details)",
+        ),
+    ] = None,
 ) -> None:
     """Perform comprehensive security audit of the system.
 
@@ -113,6 +126,9 @@ def audit(
 
         # List all available checks
         sm security audit --list-checks
+
+        # Save full report to file
+        sudo sm security audit --output /tmp/audit-report.txt
     """
     ctx = create_context(verbose=verbose, no_color=no_color)
 
@@ -163,6 +179,19 @@ def audit(
 
         # Display results
         _display_report(report, ctx, verbose)
+
+        # Generate text report
+        text_report = audit_service.generate_text_report(report)
+
+        # Auto-save to /var/log/sm/security/
+        auto_report_path = _save_report_with_rotation(report, text_report)
+        if auto_report_path:
+            console.info(f"Report saved to {auto_report_path}")
+
+        # Save additional copy if --output specified
+        if output:
+            output.write_text(text_report)
+            console.success(f"Report also saved to {output}")
 
         # Log audit completion
         audit_log.log_success(
@@ -323,3 +352,56 @@ def _display_available_checks() -> None:
 
     console.print("[dim]Checks marked (slow) are skipped with --quick flag[/dim]")
     console.print()
+
+
+def _save_report_with_rotation(report: AuditReport, text_report: str) -> Optional[Path]:
+    """Save report to /var/log/sm/security/ and rotate old reports.
+
+    Args:
+        report: The audit report (for timestamp)
+        text_report: The formatted text report content
+
+    Returns:
+        Path to saved report, or None if save failed
+    """
+    try:
+        # Create directory if needed
+        AUDIT_REPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Generate filename with timestamp
+        timestamp = report.timestamp.strftime("%Y-%m-%d-%H%M%S")
+        report_path = AUDIT_REPORT_DIR / f"audit-{timestamp}.txt"
+
+        # Save the report
+        report_path.write_text(text_report)
+
+        # Rotate old reports (keep last MAX_AUDIT_REPORTS)
+        _rotate_old_reports()
+
+        return report_path
+
+    except PermissionError:
+        console.warn(f"Cannot write to {AUDIT_REPORT_DIR} (permission denied)")
+        return None
+    except Exception as e:
+        console.warn(f"Failed to save report: {e}")
+        return None
+
+
+def _rotate_old_reports() -> None:
+    """Delete old reports, keeping only the last MAX_AUDIT_REPORTS."""
+    try:
+        # Get all audit report files sorted by modification time (oldest first)
+        reports = sorted(
+            AUDIT_REPORT_DIR.glob("audit-*.txt"),
+            key=lambda p: p.stat().st_mtime,
+        )
+
+        # Delete oldest reports if we exceed the limit
+        reports_to_delete = len(reports) - MAX_AUDIT_REPORTS
+        if reports_to_delete > 0:
+            for old_report in reports[:reports_to_delete]:
+                old_report.unlink()
+
+    except Exception:
+        pass  # Rotation failure is non-critical

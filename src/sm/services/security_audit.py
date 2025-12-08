@@ -991,7 +991,7 @@ class SecurityAuditService:
                     severity=AuditSeverity.WARN,
                     message=f"{len(nopasswd_found)} NOPASSWD rules found",
                     category="users",
-                    details="\n".join(nopasswd_found[:5]),  # Show first 5
+                    details="\n".join(nopasswd_found),
                     remediation="Review and minimize NOPASSWD sudo rules",
                 )
         except PermissionError:
@@ -1210,7 +1210,7 @@ class SecurityAuditService:
                     severity=AuditSeverity.WARN,
                     message=f"{len(unexpected)} unexpected SUID/SGID binaries",
                     category="filesystem",
-                    details="\n".join(list(unexpected)[:10]),
+                    details="\n".join(sorted(unexpected)),
                     remediation="Review and remove unnecessary SUID/SGID bits",
                 )
         except subprocess.TimeoutExpired:
@@ -1257,7 +1257,7 @@ class SecurityAuditService:
                     severity=AuditSeverity.WARN,
                     message=f"{len(files)} world-writable files found",
                     category="filesystem",
-                    details="\n".join(files[:10]),
+                    details="\n".join(sorted(files)),
                     remediation="Remove world-writable permissions: chmod o-w <file>",
                 )
         except subprocess.TimeoutExpired:
@@ -1316,7 +1316,7 @@ class SecurityAuditService:
                     severity=AuditSeverity.WARN,
                     message=f"{len(issues)} SSH keys with wrong permissions",
                     category="filesystem",
-                    details="\n".join(issues[:5]),
+                    details="\n".join(issues),
                     remediation="Run 'chmod 600' on private key files",
                 )
         except Exception as e:
@@ -1596,7 +1596,7 @@ class SecurityAuditService:
                         severity=AuditSeverity.WARN,
                         message=f"{len(warnings)} warnings found",
                         category="external",
-                        details="\n".join(warnings[:5]),
+                        details="\n".join(warnings),
                     )
                 )
 
@@ -1658,7 +1658,7 @@ class SecurityAuditService:
                         severity=AuditSeverity.FAIL,
                         message=f"{len(warnings)} warnings found",
                         category="external",
-                        details="\n".join(warnings[:5]),
+                        details="\n".join(warnings),
                         remediation="Review rkhunter warnings carefully",
                         score_weight=3,
                     )
@@ -1719,7 +1719,7 @@ class SecurityAuditService:
                         severity=AuditSeverity.FAIL,
                         message=f"{len(infected)} potential infections",
                         category="external",
-                        details="\n".join(infected[:5]),
+                        details="\n".join(infected),
                         remediation="Investigate potential rootkit infections immediately",
                         score_weight=3,
                     )
@@ -1784,3 +1784,86 @@ class SecurityAuditService:
             return 0
 
         return int(total_weighted_score / total_weight)
+
+    # ==================== Report Generation ====================
+
+    def generate_text_report(self, report: AuditReport) -> str:
+        """Generate full plain text report with all details.
+
+        Args:
+            report: The audit report to format
+
+        Returns:
+            Plain text report string
+        """
+        lines: list[str] = []
+
+        # Header
+        lines.append("SECURITY AUDIT REPORT")
+        lines.append(f"Generated: {report.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # Score label
+        if report.score >= 90:
+            score_label = "Excellent"
+        elif report.score >= 80:
+            score_label = "Good"
+        elif report.score >= 60:
+            score_label = "Fair"
+        elif report.score >= 40:
+            score_label = "Poor"
+        else:
+            score_label = "Critical"
+
+        lines.append(f"Score: {report.score}/100 ({score_label})")
+        lines.append("=" * 80)
+        lines.append("")
+
+        # Category display order
+        category_order = ["network", "users", "filesystem", "services", "external"]
+
+        # Display findings by category
+        for cat_name in category_order:
+            if cat_name not in report.categories:
+                continue
+
+            findings = report.categories[cat_name]
+            lines.append(cat_name.upper())
+            lines.append("-" * 80)
+
+            for finding in findings:
+                # Status and check name
+                lines.append(f"[{finding.severity.value}] {finding.check_id}: {finding.check_name}")
+                lines.append(f"       {finding.message}")
+
+                # Details (full, not truncated)
+                if finding.details:
+                    lines.append("       Details:")
+                    for detail_line in finding.details.split("\n"):
+                        lines.append(f"         {detail_line}")
+
+                # Remediation
+                if finding.remediation:
+                    lines.append(f"       Remediation: {finding.remediation}")
+
+                lines.append("")
+
+            lines.append("")
+
+        # Summary
+        lines.append("=" * 80)
+        lines.append("SUMMARY")
+
+        pass_count = sum(1 for f in report.findings if f.severity == AuditSeverity.PASS)
+        info_count = sum(1 for f in report.findings if f.severity == AuditSeverity.INFO)
+        warn_count = sum(1 for f in report.findings if f.severity == AuditSeverity.WARN)
+        fail_count = sum(1 for f in report.findings if f.severity == AuditSeverity.FAIL)
+        skip_count = sum(1 for f in report.findings if f.severity == AuditSeverity.SKIP)
+
+        lines.append(f"  PASS: {pass_count}  INFO: {info_count}  WARN: {warn_count}  FAIL: {fail_count}  SKIP: {skip_count}")
+
+        if report.external_tools_used:
+            lines.append(f"  External tools: {', '.join(report.external_tools_used)}")
+
+        lines.append("")
+
+        return "\n".join(lines)
