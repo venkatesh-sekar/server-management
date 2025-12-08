@@ -50,11 +50,11 @@ def audit(
     install_tools: Annotated[
         bool,
         typer.Option(
-            "--install-tools",
+            "--install-tools/--no-install-tools",
             "-i",
-            help="Install external security tools before audit",
+            help="Install external security tools before audit (default: install)",
         ),
-    ] = False,
+    ] = True,
     list_checks: Annotated[
         bool,
         typer.Option(
@@ -105,10 +105,10 @@ def audit(
         # Audit specific category
         sudo sm security audit --category network
 
-        # Install and run external tools
-        sudo sm security audit --install-tools
+        # Skip installing external tools
+        sudo sm security audit --no-install-tools
 
-        # Skip external tools
+        # Skip running external tools entirely
         sudo sm security audit --no-external
 
         # List all available checks
