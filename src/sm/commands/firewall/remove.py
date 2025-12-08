@@ -450,6 +450,8 @@ def _remove_from_chain(
                 source=rule.source or "0.0.0.0/0",
                 action=rule_action,
                 chain=chain,
+                comment=rule.comment,
+                interface=rule.in_interface,
             )
 
             if dry_run:
