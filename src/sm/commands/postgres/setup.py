@@ -228,6 +228,8 @@ def setup_pgbouncer(
     pgb_dir = Path("/etc/pgbouncer")
     run_dir = Path("/run/pgbouncer")
 
+    # Track whether user/group exist for file ownership
+    user_group_valid = False
     if not ctx.dry_run:
         pgb_dir.mkdir(parents=True, exist_ok=True)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -238,11 +240,17 @@ def setup_pgbouncer(
             uid = pwd.getpwnam(svc_user).pw_uid
             gid = grp.getgrnam(svc_group).gr_gid
             os.chown(run_dir, uid, gid)
+            user_group_valid = True
         except KeyError as e:
             console.warn(f"Could not find user/group for PgBouncer: {e}")
             console.hint("PgBouncer may have permission issues at runtime")
         except OSError as e:
             console.warn(f"Could not set ownership on {run_dir}: {e}")
+            user_group_valid = True  # User/group exist, just chown failed
+
+    # Use pgbouncer user/group if valid, otherwise fall back to postgres
+    file_owner = svc_user if user_group_valid else "postgres"
+    file_group = svc_group if user_group_valid else "postgres"
 
     # Write userlist.txt
     userlist = f'"postgres" "{pg_password}"\n'
@@ -250,8 +258,8 @@ def setup_pgbouncer(
         pgb_dir / "userlist.txt",
         userlist,
         description="Write PgBouncer userlist",
-        owner=svc_user,
-        group=svc_group,
+        owner=file_owner,
+        group=file_group,
         permissions=0o640,
     )
 
@@ -275,8 +283,8 @@ def setup_pgbouncer(
         pgb_dir / "pgbouncer.ini",
         ini_content,
         description="Write PgBouncer config",
-        owner=svc_user,
-        group=svc_group,
+        owner=file_owner,
+        group=file_group,
         permissions=0o640,
     )
 
