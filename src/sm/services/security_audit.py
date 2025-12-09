@@ -659,7 +659,11 @@ class SecurityAuditService:
         return config
 
     def _check_open_ports(self) -> AuditFinding:
-        """Check for dangerous open ports."""
+        """Check for dangerous open ports.
+
+        Considers firewall rules - ports protected by iptables DROP/REJECT
+        rules are not flagged as dangerous.
+        """
         try:
             result = subprocess.run(
                 ["ss", "-tlnp"],
@@ -675,24 +679,44 @@ class SecurityAuditService:
                     category="network",
                 )
 
+            # Get firewall-protected ports
+            protected_ports = self._get_firewall_protected_ports()
+
             dangerous_found: list[str] = []
+            protected_found: list[str] = []
+
             for line in result.stdout.splitlines():
                 # Look for ports bound to 0.0.0.0 or *
                 if "0.0.0.0:" in line or "*:" in line:
                     for port, service in DANGEROUS_PORTS.items():
                         if f":{port}" in line:
-                            dangerous_found.append(f"{port} ({service})")
+                            if port in protected_ports:
+                                protected_found.append(f"{port} ({service})")
+                            else:
+                                dangerous_found.append(f"{port} ({service})")
 
             if dangerous_found:
+                details = "These ports should not be publicly accessible"
+                if protected_found:
+                    details += f"\nFirewall-protected (OK): {', '.join(protected_found)}"
                 return AuditFinding(
                     check_id="NET-001",
                     check_name="Dangerous open ports",
                     severity=AuditSeverity.FAIL,
                     message=f"Publicly accessible: {', '.join(dangerous_found)}",
                     category="network",
-                    details="These ports should not be publicly accessible",
+                    details=details,
                     remediation="Bind services to localhost or use firewall rules",
                     score_weight=2,
+                )
+            elif protected_found:
+                return AuditFinding(
+                    check_id="NET-001",
+                    check_name="Dangerous open ports",
+                    severity=AuditSeverity.PASS,
+                    message=f"Dangerous ports protected by firewall: {', '.join(protected_found)}",
+                    category="network",
+                    details="These ports are listening but blocked by firewall rules",
                 )
             else:
                 return AuditFinding(
@@ -710,6 +734,126 @@ class SecurityAuditService:
                 message=f"Error checking ports: {e}",
                 category="network",
             )
+
+    def _get_firewall_protected_ports(self) -> set[int]:
+        """Get ports that are protected by firewall DROP/REJECT rules.
+
+        Checks iptables INPUT chain for rules that block incoming traffic
+        to specific ports from all sources (0.0.0.0/0).
+
+        Returns:
+            Set of port numbers that are blocked by firewall
+        """
+        protected: set[int] = set()
+
+        try:
+            # Get iptables INPUT chain rules
+            result = subprocess.run(
+                ["iptables", "-L", "INPUT", "-n", "-v", "--line-numbers"],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                return protected
+
+            # Check if default policy is DROP (all ports blocked by default)
+            lines = result.stdout.strip().splitlines()
+            if lines:
+                first_line = lines[0]
+                if "policy DROP" in first_line or "policy REJECT" in first_line:
+                    # With DROP policy, check which ports have ACCEPT rules
+                    # Ports without ACCEPT rules are effectively protected
+                    accepted_ports = self._get_accepted_ports_from_rules(lines[2:])
+                    # All dangerous ports not in accepted_ports are protected
+                    for port in DANGEROUS_PORTS:
+                        if port not in accepted_ports:
+                            protected.add(port)
+                    return protected
+
+            # With ACCEPT policy, look for explicit DROP/REJECT rules
+            for line in lines[2:]:  # Skip header lines
+                if not line.strip():
+                    continue
+
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+
+                target = parts[3] if len(parts) > 3 else ""
+
+                # Only consider DROP or REJECT rules
+                if target not in ("DROP", "REJECT"):
+                    continue
+
+                # Look for destination port in the line
+                # Format: dpt:PORT or dpts:PORT:PORT (range)
+                for part in parts:
+                    if part.startswith("dpt:"):
+                        try:
+                            port = int(part.split(":")[1])
+                            protected.add(port)
+                        except (ValueError, IndexError):
+                            pass
+                    elif part.startswith("dpts:"):
+                        # Port range
+                        try:
+                            range_part = part.split(":")[1]
+                            start, end = range_part.split(":")
+                            for port in range(int(start), int(end) + 1):
+                                protected.add(port)
+                        except (ValueError, IndexError):
+                            pass
+
+        except FileNotFoundError:
+            pass  # iptables not installed
+        except Exception:
+            pass
+
+        return protected
+
+    def _get_accepted_ports_from_rules(self, rule_lines: list[str]) -> set[int]:
+        """Extract ports that have ACCEPT rules from iptables output.
+
+        Args:
+            rule_lines: Lines from iptables output (excluding headers)
+
+        Returns:
+            Set of port numbers with ACCEPT rules
+        """
+        accepted: set[int] = set()
+
+        for line in rule_lines:
+            if not line.strip():
+                continue
+
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+
+            target = parts[3] if len(parts) > 3 else ""
+
+            # Only consider ACCEPT rules
+            if target != "ACCEPT":
+                continue
+
+            # Look for destination port
+            for part in parts:
+                if part.startswith("dpt:"):
+                    try:
+                        port = int(part.split(":")[1])
+                        accepted.add(port)
+                    except (ValueError, IndexError):
+                        pass
+                elif part.startswith("dpts:"):
+                    try:
+                        range_part = part.split(":")[1]
+                        start, end = range_part.split(":")
+                        for port in range(int(start), int(end) + 1):
+                            accepted.add(port)
+                    except (ValueError, IndexError):
+                        pass
+
+        return accepted
 
     def _check_firewall(self) -> AuditFinding:
         """Check if firewall is enabled."""
