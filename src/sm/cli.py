@@ -76,6 +76,7 @@ from sm.commands.postgres.optimize import app as postgres_optimize_app
 from sm.commands.postgres.backup import app as postgres_backup_app
 from sm.commands.postgres.restore import app as postgres_restore_app
 from sm.commands.postgres.migrate import app as postgres_migrate_app
+from sm.commands.postgres.extension import app as postgres_extension_app
 from sm.commands.docker import app as docker_commands_app
 from sm.commands.firewall import app as firewall_app
 from sm.commands.mongodb.user import app as mongodb_user_app
@@ -90,6 +91,7 @@ postgres_app.add_typer(postgres_optimize_app, name="optimize")
 postgres_app.add_typer(postgres_backup_app, name="backup")
 postgres_app.add_typer(postgres_restore_app, name="restore")
 postgres_app.add_typer(postgres_migrate_app, name="migrate")
+postgres_app.add_typer(postgres_extension_app, name="extension")
 
 # Register mongodb sub-commands
 mongodb_app.add_typer(mongodb_user_app, name="user")

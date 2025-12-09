@@ -71,6 +71,10 @@ def create_database(
         None, "--owner", "-o",
         help="Owner username (existing user)",
     ),
+    with_pgvector: bool = typer.Option(
+        False, "--with-pgvector",
+        help="Enable pgvector extension for vector similarity search",
+    ),
     skip_pgbouncer: bool = typer.Option(
         False, "--skip-pgbouncer",
         help="Skip PgBouncer configuration",
@@ -90,6 +94,8 @@ def create_database(
         sm postgres db create -d myapp
 
         sm postgres db create -d myapp -o existing_user
+
+        sm postgres db create -d embeddings --with-pgvector
     """
     ctx = create_context(dry_run=dry_run, force=force, yes=yes, verbose=verbose)
     audit = get_audit_logger()
@@ -124,6 +130,7 @@ def create_database(
     console.print("[bold]Configuration[/bold]")
     console.print(f"  Database:  {name}")
     console.print(f"  Owner:     {owner or 'postgres (default)'}")
+    console.print(f"  pgvector:  {'Enabled' if with_pgvector else 'Disabled'}")
     console.print(f"  PgBouncer: {'Skipped' if skip_pgbouncer else 'Enabled'}")
     console.print()
 
@@ -141,6 +148,11 @@ def create_database(
             if owner:
                 pg.harden_database(name, owner)
 
+            # Enable pgvector if requested
+            if with_pgvector:
+                pg.install_extension_package("vector")
+                pg.enable_extension(name, "vector", rollback=rollback)
+
             # Update PgBouncer
             if not skip_pgbouncer and pgb.is_installed():
                 pgb.add_database(name)
@@ -153,17 +165,22 @@ def create_database(
             AuditEventType.DATABASE_CREATE,
             "database",
             name,
-            message=f"Database created with owner {owner or 'postgres'}",
+            message=f"Database created with owner {owner or 'postgres'}"
+                    + (", pgvector enabled" if with_pgvector else ""),
         )
 
         # Summary
+        summary_data = {
+            "Database": name,
+            "Owner": owner or "postgres",
+        }
+        if with_pgvector:
+            summary_data["pgvector"] = "Enabled"
+
         console.print()
         console.summary(
             "Database Created",
-            {
-                "Database": name,
-                "Owner": owner or "postgres",
-            },
+            summary_data,
             success=True,
         )
 
@@ -189,6 +206,10 @@ def create_database_with_user(
         help="Password (auto-generated if not provided)",
         hide_input=True,
     ),
+    with_pgvector: bool = typer.Option(
+        False, "--with-pgvector",
+        help="Enable pgvector extension for vector similarity search",
+    ),
     skip_pgbouncer: bool = typer.Option(
         False, "--skip-pgbouncer",
         help="Skip PgBouncer configuration",
@@ -210,6 +231,8 @@ def create_database_with_user(
         sm postgres db create-with-user -d myapp
 
         sm postgres db create-with-user -d myapp -u myapp_admin
+
+        sm postgres db create-with-user -d myapp --with-pgvector
 
         sm postgres db create-with-user -d myapp --dry-run
     """
@@ -254,6 +277,7 @@ def create_database_with_user(
     console.print("[bold]Configuration[/bold]")
     console.print(f"  Database:  {database}")
     console.print(f"  User:      {username} (owner)")
+    console.print(f"  pgvector:  {'Enabled' if with_pgvector else 'Disabled'}")
     console.print(f"  PgBouncer: {'Skipped' if skip_pgbouncer else 'Enabled'}")
     console.print()
 
@@ -272,6 +296,11 @@ def create_database_with_user(
 
             # Harden database
             pg.harden_database(database, username)
+
+            # Enable pgvector if requested
+            if with_pgvector:
+                pg.install_extension_package("vector")
+                pg.enable_extension(database, "vector", rollback=rollback)
 
             # Verify connection
             pg.verify_connection(database, username, final_password)
@@ -295,20 +324,25 @@ def create_database_with_user(
             AuditEventType.DATABASE_CREATE,
             "database",
             database,
-            message=f"Database created with owner {username}",
+            message=f"Database created with owner {username}"
+                    + (", pgvector enabled" if with_pgvector else ""),
         )
 
         # Summary
         pass_file = creds.get_password_path(username, database)
+        summary_data = {
+            "Database": database,
+            "User": f"{username} (owner)",
+            "Password file": str(pass_file),
+            "Direct connection": f"postgresql://{username}:***@127.0.0.1:5432/{database}",
+        }
+        if with_pgvector:
+            summary_data["pgvector"] = "Enabled"
+
         console.print()
         console.summary(
             "Database and User Created",
-            {
-                "Database": database,
-                "User": f"{username} (owner)",
-                "Password file": str(pass_file),
-                "Direct connection": f"postgresql://{username}:***@127.0.0.1:5432/{database}",
-            },
+            summary_data,
             success=True,
         )
 

@@ -36,6 +36,21 @@ class UserInfo:
     roles: list[str]
 
 
+@dataclass
+class ExtensionInfo:
+    """Information about a PostgreSQL extension."""
+    name: str
+    version: str
+    schema: str
+
+
+# Known extension to package mappings
+# Format: extension_name -> package_name_template (use {version} for PG version)
+EXTENSION_PACKAGES: dict[str, str] = {
+    "vector": "postgresql-{version}-pgvector",
+}
+
+
 class PostgreSQLService:
     """Safe interface for PostgreSQL operations.
 
@@ -639,6 +654,193 @@ class PostgreSQLService:
 
         self._run_sql(sql, database=database, description=f"Revoke access from '{username}'")
         self.ctx.console.success(f"Access revoked from '{username}'")
+
+    # =========================================================================
+    # Extension Operations
+    # =========================================================================
+
+    def extension_exists(self, database: str, extension: str) -> bool:
+        """Check if an extension is enabled on a database.
+
+        Args:
+            database: Database name
+            extension: Extension name (e.g., "vector")
+
+        Returns:
+            True if extension is enabled
+        """
+        if self.ctx.dry_run:
+            return False
+
+        result = self._run_sql(
+            f"SELECT 1 FROM pg_extension WHERE extname = '{extension}'",
+            database=database,
+            check=False,
+        )
+        return bool(result.strip())
+
+    def list_extensions(self, database: str) -> list[ExtensionInfo]:
+        """List all enabled extensions on a database.
+
+        Args:
+            database: Database name
+
+        Returns:
+            List of ExtensionInfo objects
+        """
+        if self.ctx.dry_run:
+            return []
+
+        result = self._run_sql(
+            """
+            SELECT e.extname, e.extversion, n.nspname
+            FROM pg_extension e
+            JOIN pg_namespace n ON e.extnamespace = n.oid
+            ORDER BY e.extname
+            """,
+            database=database,
+        )
+
+        extensions = []
+        for line in result.strip().splitlines():
+            parts = line.split("|")
+            if len(parts) >= 3:
+                extensions.append(ExtensionInfo(
+                    name=parts[0].strip(),
+                    version=parts[1].strip(),
+                    schema=parts[2].strip(),
+                ))
+
+        return extensions
+
+    def install_extension_package(self, extension: str) -> None:
+        """Install the system package for a PostgreSQL extension.
+
+        Args:
+            extension: Extension name (e.g., "vector")
+
+        Raises:
+            PostgresError: If package is unknown or installation fails
+        """
+        if extension not in EXTENSION_PACKAGES:
+            raise PostgresError(
+                f"Unknown extension: {extension}",
+                hint=f"Supported extensions: {', '.join(sorted(EXTENSION_PACKAGES.keys()))}",
+            )
+
+        # Detect PostgreSQL version
+        version = self.detect_version()
+        if not version:
+            raise PostgresError(
+                "Could not detect PostgreSQL version",
+                hint="Ensure PostgreSQL is installed first with 'sm postgres setup'",
+            )
+
+        # Build package name
+        package_template = EXTENSION_PACKAGES[extension]
+        package_name = package_template.format(version=version)
+
+        self.ctx.console.step(f"Installing extension package '{package_name}'")
+
+        if self.ctx.dry_run:
+            self.ctx.console.dry_run_msg(f"apt-get install {package_name}")
+            return
+
+        self.executor.apt_install(
+            [package_name],
+            description=f"Install {extension} extension package",
+        )
+
+        self.ctx.console.success(f"Package '{package_name}' installed")
+
+    def enable_extension(
+        self,
+        database: str,
+        extension: str,
+        *,
+        schema: str = "public",
+        rollback: Optional[RollbackStack] = None,
+    ) -> None:
+        """Enable an extension on a database.
+
+        Args:
+            database: Database name
+            extension: Extension name (e.g., "vector")
+            schema: Schema to install the extension into
+            rollback: Rollback stack for cleanup on failure
+
+        Raises:
+            PostgresError: If enabling fails
+        """
+        validate_identifier(database, "database")
+
+        # Check if already enabled (idempotent)
+        if self.extension_exists(database, extension):
+            self.ctx.console.info(f"Extension '{extension}' already enabled on '{database}'")
+            return
+
+        self.ctx.console.step(f"Enabling extension '{extension}' on '{database}'")
+
+        sql = f'CREATE EXTENSION IF NOT EXISTS "{extension}" SCHEMA "{schema}"'
+
+        self._run_sql(
+            sql,
+            database=database,
+            description=f"Enable extension '{extension}' on '{database}'",
+        )
+
+        # Add rollback action
+        if rollback:
+            rollback.add(
+                f"Disable extension '{extension}' on '{database}'",
+                lambda d=database, e=extension: self.disable_extension(d, e),
+            )
+
+        # Verify extension was created
+        if not self.ctx.dry_run and not self.extension_exists(database, extension):
+            raise PostgresError(
+                f"Extension '{extension}' was not enabled successfully",
+                hint="Check PostgreSQL logs for details",
+            )
+
+        self.ctx.console.success(f"Extension '{extension}' enabled on '{database}'")
+
+    def disable_extension(
+        self,
+        database: str,
+        extension: str,
+        *,
+        cascade: bool = False,
+    ) -> None:
+        """Disable an extension on a database.
+
+        Args:
+            database: Database name
+            extension: Extension name
+            cascade: Also drop dependent objects
+
+        Raises:
+            PostgresError: If disabling fails
+        """
+        validate_identifier(database, "database")
+
+        if not self.extension_exists(database, extension):
+            self.ctx.console.info(f"Extension '{extension}' not enabled on '{database}'")
+            return
+
+        self.ctx.console.step(f"Disabling extension '{extension}' on '{database}'")
+
+        sql = f'DROP EXTENSION IF EXISTS "{extension}"'
+        if cascade:
+            sql += " CASCADE"
+
+        self._run_sql(
+            sql,
+            database=database,
+            description=f"Disable extension '{extension}' on '{database}'",
+        )
+
+        self.ctx.console.success(f"Extension '{extension}' disabled on '{database}'")
 
     # =========================================================================
     # Connection Testing

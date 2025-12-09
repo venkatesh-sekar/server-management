@@ -93,6 +93,10 @@ class AuditEventType(Enum):
     FIREWALL_EXCLUSIVE = "firewall.exclusive"
     FIREWALL_IMPORT = "firewall.import"
 
+    # Extension operations
+    EXTENSION_ENABLE = "extension.enable"
+    EXTENSION_DISABLE = "extension.disable"
+
 
 class AuditResult(Enum):
     """Result of an audited operation."""
