@@ -343,7 +343,6 @@ def create_database_with_user(
         console.summary(
             "Database and User Created",
             summary_data,
-            success=True,
         )
 
         if not skip_pgbouncer and pgb.is_installed():
