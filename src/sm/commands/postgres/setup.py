@@ -208,6 +208,51 @@ def setup_postgres(
     return superuser_pass
 
 
+def _ensure_pgbouncer_user(
+    ctx: ExecutionContext,
+    executor: CommandExecutor,
+    user: str,
+    group: str,
+) -> None:
+    """Ensure PgBouncer system user and group exist.
+
+    Creates the user/group if they don't exist. This is needed because
+    some package installations don't create the user/group automatically.
+    """
+    if ctx.dry_run:
+        return
+
+    import grp
+    import pwd
+
+    # Check and create group if needed
+    try:
+        grp.getgrnam(group)
+    except KeyError:
+        console.info(f"Creating system group '{group}'")
+        executor.run(
+            ["groupadd", "--system", group],
+            description=f"Create {group} group",
+        )
+
+    # Check and create user if needed
+    try:
+        pwd.getpwnam(user)
+    except KeyError:
+        console.info(f"Creating system user '{user}'")
+        executor.run(
+            [
+                "useradd",
+                "--system",
+                "--gid", group,
+                "--no-create-home",
+                "--shell", "/usr/sbin/nologin",
+                user,
+            ],
+            description=f"Create {user} user",
+        )
+
+
 def setup_pgbouncer(
     ctx: ExecutionContext,
     executor: CommandExecutor,
@@ -220,37 +265,32 @@ def setup_pgbouncer(
 
     console.step("Configuring PgBouncer")
 
-    # Get service user
+    # Get service user from systemd unit file
     svc_user, svc_group = systemd.get_service_user("pgbouncer.service")
     console.debug(f"PgBouncer runs as {svc_user}:{svc_group}")
+
+    # Ensure the pgbouncer user/group exist (some installations don't create them)
+    _ensure_pgbouncer_user(ctx, executor, svc_user, svc_group)
 
     # Ensure directories
     pgb_dir = Path("/etc/pgbouncer")
     run_dir = Path("/run/pgbouncer")
 
-    # Track whether user/group exist for file ownership
-    user_group_valid = False
     if not ctx.dry_run:
-        pgb_dir.mkdir(parents=True, exist_ok=True)
-        run_dir.mkdir(parents=True, exist_ok=True)
         import os
         import pwd
         import grp
+
+        pgb_dir.mkdir(parents=True, exist_ok=True)
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        # Set ownership on run directory
         try:
             uid = pwd.getpwnam(svc_user).pw_uid
             gid = grp.getgrnam(svc_group).gr_gid
             os.chown(run_dir, uid, gid)
-            user_group_valid = True
-        except KeyError as e:
-            console.warn(f"Could not find user/group for PgBouncer: {e}")
-            console.hint("PgBouncer may have permission issues at runtime")
         except OSError as e:
             console.warn(f"Could not set ownership on {run_dir}: {e}")
-            user_group_valid = True  # User/group exist, just chown failed
-
-    # Use pgbouncer user/group if valid, otherwise fall back to postgres
-    file_owner = svc_user if user_group_valid else "postgres"
-    file_group = svc_group if user_group_valid else "postgres"
 
     # Write userlist.txt
     userlist = f'"postgres" "{pg_password}"\n'
@@ -258,8 +298,8 @@ def setup_pgbouncer(
         pgb_dir / "userlist.txt",
         userlist,
         description="Write PgBouncer userlist",
-        owner=file_owner,
-        group=file_group,
+        owner=svc_user,
+        group=svc_group,
         permissions=0o640,
     )
 
@@ -283,8 +323,8 @@ def setup_pgbouncer(
         pgb_dir / "pgbouncer.ini",
         ini_content,
         description="Write PgBouncer config",
-        owner=file_owner,
-        group=file_group,
+        owner=svc_user,
+        group=svc_group,
         permissions=0o640,
     )
 

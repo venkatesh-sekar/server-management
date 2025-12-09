@@ -168,7 +168,6 @@ class SystemdService:
         except Exception as e:
             raise ServiceError(
                 f"Failed to start {service}",
-                service=service,
                 hint=f"Check logs: journalctl -xeu {service}",
             ) from e
 
@@ -194,7 +193,7 @@ class SystemdService:
         except Exception as e:
             raise ServiceError(
                 f"Failed to stop {service}",
-                service=service,
+                hint=f"Check logs: journalctl -xeu {service}",
             ) from e
 
     def restart(self, service: str, *, description: Optional[str] = None) -> None:
@@ -219,7 +218,6 @@ class SystemdService:
         except Exception as e:
             raise ServiceError(
                 f"Failed to restart {service}",
-                service=service,
                 hint=f"Check logs: journalctl -xeu {service}",
             ) from e
 
