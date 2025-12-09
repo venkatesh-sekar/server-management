@@ -4,6 +4,7 @@ Provides a safe interface for managing PostgreSQL databases and users.
 All SQL operations use parameterized queries to prevent injection.
 """
 
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -12,6 +13,15 @@ from sm.core.context import ExecutionContext
 from sm.core.executor import CommandExecutor, RollbackStack
 from sm.core.exceptions import PostgresError
 from sm.core.validation import validate_identifier
+
+
+def _unique_dollar_tag() -> str:
+    """Generate a unique dollar-quote tag to safely embed passwords in SQL.
+
+    PostgreSQL dollar quoting uses $tag$...$tag$ syntax. By using a random
+    tag, we prevent issues if the password itself contains $pass$ or similar.
+    """
+    return f"p{secrets.token_hex(4)}"
 
 
 @dataclass
@@ -383,13 +393,15 @@ class PostgreSQLService:
 
         options_str = " ".join(options)
 
-        # Use DO block for safe password handling
+        # Use DO block with unique dollar-quote tag for safe password handling
+        # This prevents issues if the password contains $pass$ or similar
+        tag = _unique_dollar_tag()
         sql = f"""
         SET password_encryption = 'scram-sha-256';
 
         DO $$
         DECLARE
-          _pass text := $pass${password}$pass$;
+          _pass text := ${tag}${password}${tag}$;
         BEGIN
           IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{name}') THEN
             EXECUTE format(
@@ -518,9 +530,11 @@ class PostgreSQLService:
                 hint="Use 'sm postgres user create' to create the user first",
             )
 
+        # Use unique dollar-quote tag to safely embed password
+        tag = _unique_dollar_tag()
         sql = f"""
         SET password_encryption = 'scram-sha-256';
-        ALTER ROLE "{name}" WITH PASSWORD $pass${new_password}$pass$;
+        ALTER ROLE "{name}" WITH PASSWORD ${tag}${new_password}${tag}$;
         """
 
         self.ctx.console.step(f"Rotating password for '{name}'")

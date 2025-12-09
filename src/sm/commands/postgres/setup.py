@@ -30,7 +30,7 @@ from sm.core import (
     PostgresError,
     ConfigurationError,
 )
-from sm.core.validation import validate_cidr, validate_url, validate_path
+from sm.core.validation import validate_path
 from sm.services.systemd import SystemdService
 from sm.services.tuning import PostgresTuningService, WorkloadProfile
 
@@ -188,10 +188,13 @@ def setup_postgres(
     superuser_pass, generated = creds.ensure_password("postgres", "_system", dry_run=ctx.dry_run)
 
     if not ctx.dry_run:
+        # Use unique dollar-quote tag to safely embed password
+        import secrets
+        tag = f"p{secrets.token_hex(4)}"
         executor.run_sql(
             f"""
             SET password_encryption = 'scram-sha-256';
-            ALTER USER postgres WITH PASSWORD '{superuser_pass}';
+            ALTER USER postgres WITH PASSWORD ${tag}${superuser_pass}${tag}$;
             """,
             description="Set postgres password",
         )
@@ -235,8 +238,11 @@ def setup_pgbouncer(
             uid = pwd.getpwnam(svc_user).pw_uid
             gid = grp.getgrnam(svc_group).gr_gid
             os.chown(run_dir, uid, gid)
-        except (KeyError, OSError):
-            pass
+        except KeyError as e:
+            console.warn(f"Could not find user/group for PgBouncer: {e}")
+            console.hint("PgBouncer may have permission issues at runtime")
+        except OSError as e:
+            console.warn(f"Could not set ownership on {run_dir}: {e}")
 
     # Write userlist.txt
     userlist = f'"postgres" "{pg_password}"\n'
@@ -301,18 +307,28 @@ def setup_pgbackrest(
     ]
 
     if not ctx.dry_run:
+        import os
+        import pwd
+        import grp
+
+        # Get postgres user/group once
+        try:
+            uid = pwd.getpwnam("postgres").pw_uid
+            gid = grp.getgrnam("postgres").gr_gid
+        except KeyError as e:
+            console.warn(f"Could not find postgres user/group: {e}")
+            console.hint("pgBackRest may have permission issues")
+            uid = None
+            gid = None
+
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
-            import os
-            import pwd
-            import grp
-            try:
-                uid = pwd.getpwnam("postgres").pw_uid
-                gid = grp.getgrnam("postgres").gr_gid
-                os.chown(d, uid, gid)
-                os.chmod(d, 0o750)
-            except (KeyError, OSError):
-                pass
+            if uid is not None and gid is not None:
+                try:
+                    os.chown(d, uid, gid)
+                    os.chmod(d, 0o750)
+                except OSError as e:
+                    console.warn(f"Could not set permissions on {d}: {e}")
 
     # Store passphrase securely
     pass_file = Path("/etc/pgbackrest/repo1.pass")
@@ -461,6 +477,35 @@ def run_setup(
         if not skip_backup and backup_config:
             setup_pgbackrest(ctx, executor, pg_version, backup_config)
             setup_stanza(ctx, executor, systemd, pg_version)
+
+        # Verify PostgreSQL is running and accessible
+        console.step("Verifying PostgreSQL installation")
+        if not ctx.dry_run:
+            result = executor.run(
+                ["pg_isready", "-h", "127.0.0.1", "-p", "5432"],
+                check=False,
+                description="Check PostgreSQL is accepting connections",
+            )
+            if result.success:
+                console.success("PostgreSQL is running and accepting connections")
+            else:
+                console.warn("PostgreSQL may not be fully ready yet")
+                console.hint("Wait a moment and check with: pg_isready -h 127.0.0.1")
+
+            # Verify PgBouncer
+            pgb_port = pgbouncer_config.get("port", 6432)
+            result = executor.run(
+                ["pg_isready", "-h", "127.0.0.1", "-p", str(pgb_port)],
+                check=False,
+                description="Check PgBouncer is accepting connections",
+            )
+            if result.success:
+                console.success(f"PgBouncer is running on port {pgb_port}")
+            else:
+                console.warn("PgBouncer may not be fully ready yet")
+                console.hint(f"Check with: pg_isready -h 127.0.0.1 -p {pgb_port}")
+        else:
+            console.dry_run_msg("Would verify PostgreSQL and PgBouncer are running")
 
         # Log success
         audit.log_success(

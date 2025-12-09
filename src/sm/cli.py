@@ -471,14 +471,21 @@ def postgres_setup_cmd(
         str,
         typer.Option(
             "--version",
-            help="PostgreSQL version to install (e.g., 17, 18)",
+            help="PostgreSQL version to install (e.g., 17, 18). Only used with --non-interactive.",
         ),
     ] = "18",
     skip_backup: Annotated[
         bool,
         typer.Option(
             "--skip-backup",
-            help="Skip pgBackRest backup configuration",
+            help="Skip pgBackRest backup configuration. Only used with --non-interactive.",
+        ),
+    ] = False,
+    non_interactive: Annotated[
+        bool,
+        typer.Option(
+            "--non-interactive",
+            help="Use non-interactive mode (requires config file and env vars for credentials).",
         ),
     ] = False,
     dry_run: DryRunOption = False,
@@ -490,29 +497,47 @@ def postgres_setup_cmd(
 ) -> None:
     """Set up PostgreSQL with PgBouncer and pgBackRest.
 
-    Performs complete PostgreSQL installation and configuration:
-    - Installs PostgreSQL from PGDG repository
-    - Configures PgBouncer connection pooler
-    - Sets up pgBackRest with S3/B2 backups (if configured)
-    - Configures secure defaults
+    By default, runs an interactive wizard that guides you through all
+    configuration options with smart defaults and validation.
 
-    [bold]Prerequisites:[/bold]
-    - Debian or Ubuntu system
-    - Root access
-    - Configuration file with backup settings (if not using --skip-backup)
+    [bold]Interactive Mode (default):[/bold]
+    - Step-by-step guided setup
+    - Smart defaults for all settings
+    - B2 region selection with pre-populated endpoints
+    - Secure credential prompting
+
+    [bold]Non-Interactive Mode:[/bold]
+    Use --non-interactive for scripted/automated deployments.
+    Requires config file and environment variables for credentials.
 
     [bold]Examples:[/bold]
 
-        # Full setup with backups (requires config)
+        # Interactive wizard (recommended)
         sm postgres setup
 
-        # Setup without backups
-        sm postgres setup --skip-backup
+        # Non-interactive with config file
+        sm postgres setup --non-interactive
 
         # Preview what would happen
         sm postgres setup --dry-run
     """
-    from sm.commands.postgres.setup import run_setup, require_root
+    # Interactive mode (default): Run the wizard
+    if not non_interactive:
+        from sm.commands.postgres.wizard import PostgresWizard
+
+        try:
+            wizard = PostgresWizard(
+                dry_run=dry_run,
+                yes=yes,
+                verbose=verbose,
+            )
+            wizard.run()
+        except SMError as e:
+            handle_error(e)
+        return
+
+    # Non-interactive mode: Use config file and env vars
+    from sm.commands.postgres.setup import run_setup
 
     ctx = get_context(
         dry_run=dry_run,

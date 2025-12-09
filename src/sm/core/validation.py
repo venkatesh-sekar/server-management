@@ -507,3 +507,123 @@ class Validator:
         if self._value is None:
             raise ValidationError("Value is required")
         return self._value
+
+
+# B2 bucket name validation
+B2_BUCKET_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
+
+
+def validate_b2_bucket_name(name: str) -> str:
+    """Validate Backblaze B2 bucket name format.
+
+    B2 bucket naming rules:
+    - 6-50 characters
+    - Only lowercase letters, numbers, hyphens
+    - Must start and end with letter or number
+    - Cannot contain consecutive hyphens
+
+    Args:
+        name: Bucket name to validate
+
+    Returns:
+        The validated bucket name
+
+    Raises:
+        ValidationError: If validation fails
+    """
+    name = name.strip().lower()
+
+    if not name:
+        raise ValidationError(
+            "Bucket name is required",
+            hint="Provide a bucket name like 'mycompany-pg-backups'",
+        )
+
+    if len(name) < 6:
+        raise ValidationError(
+            f"Bucket name must be at least 6 characters (got {len(name)})",
+            hint="Use a longer bucket name like 'mycompany-pg-backups'",
+        )
+
+    if len(name) > 50:
+        raise ValidationError(
+            f"Bucket name must be at most 50 characters (got {len(name)})",
+            hint="Use a shorter bucket name",
+        )
+
+    # For single-character names (shouldn't happen due to length check, but be safe)
+    if len(name) == 1:
+        if not name.isalnum():
+            raise ValidationError(
+                "Bucket name must contain only lowercase letters, numbers, and hyphens",
+                hint="Use a name like 'mycompany-pg-backups'",
+            )
+    elif not B2_BUCKET_NAME_PATTERN.match(name):
+        raise ValidationError(
+            "Bucket name must start and end with a letter or number, "
+            "and contain only lowercase letters, numbers, and hyphens",
+            hint="Use a name like 'mycompany-pg-backups'",
+        )
+
+    if "--" in name:
+        raise ValidationError(
+            "Bucket name cannot contain consecutive hyphens",
+            hint="Use single hyphens between words",
+        )
+
+    return name
+
+
+def validate_backup_passphrase(
+    passphrase: str,
+    min_length: int = 20,
+) -> str:
+    """Validate backup encryption passphrase strength.
+
+    Requirements:
+    - Minimum 20 characters by default
+    - Not entirely whitespace
+
+    Note: Unlike passwords, passphrases can be simpler (just long)
+    because they're typically not brute-forced online.
+
+    Args:
+        passphrase: Passphrase to validate
+        min_length: Minimum required length (default 20)
+
+    Returns:
+        The validated passphrase
+
+    Raises:
+        ValidationError: If validation fails
+    """
+    if not passphrase:
+        raise ValidationError(
+            "Backup passphrase is required",
+            hint="Provide a passphrase of at least 20 characters",
+        )
+
+    if passphrase != passphrase.strip():
+        raise ValidationError(
+            "Passphrase should not have leading or trailing whitespace",
+            hint="Remove extra spaces from the beginning and end",
+        )
+
+    if len(passphrase) < min_length:
+        raise ValidationError(
+            f"Passphrase must be at least {min_length} characters (got {len(passphrase)})",
+            hint="Use a longer passphrase for security",
+            details=[
+                "A passphrase can be a sentence or phrase that's easy to remember",
+                "Example: 'correct horse battery staple' (but use your own!)",
+            ],
+        )
+
+    # Check for trivially weak passphrases
+    if passphrase == passphrase[0] * len(passphrase):
+        raise ValidationError(
+            "Passphrase cannot be all the same character",
+            hint="Use a more complex passphrase",
+        )
+
+    return passphrase
