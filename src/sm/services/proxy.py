@@ -383,7 +383,25 @@ class ProxyService:
                 details=[result.stderr] if result.stderr else None,
             )
 
-        self.executor.run(["systemctl", "reload", "openresty"], check=True)
+        # Try reload first, fall back to restart if PID file is invalid/empty
+        reload_result = self.executor.run(
+            ["systemctl", "reload", "openresty"],
+            check=False,
+        )
+
+        if not reload_result.success:
+            # Check if it's a PID file issue (service not actually running)
+            if "invalid PID" in (reload_result.stderr or ""):
+                self.ctx.console.warn("OpenResty not running, starting instead")
+                self.executor.run(["systemctl", "restart", "openresty"], check=True)
+            else:
+                raise ExecutionError(
+                    "Failed to reload OpenResty",
+                    command="systemctl reload openresty",
+                    return_code=reload_result.returncode,
+                    stderr=reload_result.stderr,
+                )
+
         self.ctx.console.success("OpenResty reloaded")
 
     # =========================================================================
