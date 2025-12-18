@@ -541,8 +541,9 @@ class ProxyService:
 
             rollback.add(f"Remove endpoint '{endpoint.name}'", rollback_remove)
 
-        # Regenerate and reload
+        # Regenerate configs and reload
         self.generate_nginx_config()
+        self.generate_lua_scripts()
         if self.is_running():
             self.reload()
 
@@ -578,8 +579,9 @@ class ProxyService:
         config["endpoints"] = new_endpoints
         self.save_config(config)
 
-        # Regenerate and reload
+        # Regenerate configs and reload
         self.generate_nginx_config()
+        self.generate_lua_scripts()
         if self.is_running():
             self.reload()
 
