@@ -23,6 +23,11 @@ http {
     lua_shared_dict rate_limit 10m;
     lua_shared_dict api_keys 1m;
 
+    # Declare api_key_name variable (can be overwritten by Lua in server blocks)
+    map $uri $api_key_name {
+        default "-";
+    }
+
     # Load API keys on startup
     init_by_lua_file /etc/openresty/lua/init.lua;
 
