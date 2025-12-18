@@ -338,10 +338,13 @@ class ProxyService:
         # Kill any remaining processes
         self.executor.run(["pkill", "-9", "nginx"], check=False)
 
-        # Remove PID file
-        pid_file = Path("/run/openresty.pid")
-        if pid_file.exists():
-            pid_file.unlink()
+        # Remove PID files (both possible locations)
+        for pid_path in [
+            Path("/run/openresty.pid"),
+            Path("/usr/local/openresty/nginx/logs/nginx.pid"),
+        ]:
+            if pid_path.exists():
+                pid_path.unlink()
 
         # Remove config files
         if self.config_path.exists():

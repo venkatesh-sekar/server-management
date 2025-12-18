@@ -4,7 +4,7 @@
 
 worker_processes {{ worker_processes }};
 error_log /var/log/sm/proxy-error.log warn;
-pid /run/openresty.pid;
+pid /usr/local/openresty/nginx/logs/nginx.pid;
 
 events {
     worker_connections {{ worker_connections }};
