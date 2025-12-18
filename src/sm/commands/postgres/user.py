@@ -345,7 +345,6 @@ def rotate_password(
                 "User": username,
                 "Password file": str(creds.get_password_path(username, database)),
             },
-            success=True,
         )
 
     except PostgresError as e:
