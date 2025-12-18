@@ -316,6 +316,71 @@ class ProxyService:
 
         self.ctx.console.success("OpenResty uninstalled")
 
+    def reset(self, *, uninstall_openresty: bool = False) -> None:
+        """Completely reset proxy configuration.
+
+        Stops service, removes all config files, keys, and logs.
+        Optionally uninstalls OpenResty.
+
+        Args:
+            uninstall_openresty: Also uninstall OpenResty package
+        """
+        self.ctx.console.step("Resetting proxy configuration")
+
+        if self.ctx.dry_run:
+            self.ctx.console.dry_run_msg("Would reset proxy configuration")
+            return
+
+        # Stop and disable service
+        self.executor.run(["systemctl", "stop", "openresty"], check=False)
+        self.executor.run(["systemctl", "disable", "openresty"], check=False)
+
+        # Kill any remaining processes
+        self.executor.run(["pkill", "-9", "nginx"], check=False)
+
+        # Remove PID file
+        pid_file = Path("/run/openresty.pid")
+        if pid_file.exists():
+            pid_file.unlink()
+
+        # Remove config files
+        if self.config_path.exists():
+            self.config_path.unlink()
+            self.ctx.console.info(f"Removed {self.config_path}")
+
+        if self.keys_path.exists():
+            self.keys_path.unlink()
+            self.ctx.console.info(f"Removed {self.keys_path}")
+
+        # Remove nginx config
+        nginx_conf = self.nginx_conf_dir / "nginx.conf"
+        if nginx_conf.exists():
+            nginx_conf.unlink()
+            self.ctx.console.info(f"Removed {nginx_conf}")
+
+        # Also check default OpenResty location
+        default_nginx_conf = Path("/usr/local/openresty/nginx/conf/nginx.conf")
+        if default_nginx_conf.exists():
+            default_nginx_conf.unlink()
+            self.ctx.console.info(f"Removed {default_nginx_conf}")
+
+        # Remove Lua scripts
+        if self.lua_dir.exists():
+            import shutil
+            shutil.rmtree(self.lua_dir)
+            self.ctx.console.info(f"Removed {self.lua_dir}")
+
+        # Remove logs
+        for log_file in self.log_dir.glob("proxy-*.log"):
+            log_file.unlink()
+            self.ctx.console.info(f"Removed {log_file}")
+
+        # Optionally uninstall OpenResty
+        if uninstall_openresty:
+            self.uninstall()
+
+        self.ctx.console.success("Proxy configuration reset")
+
     # =========================================================================
     # Service Management
     # =========================================================================

@@ -322,3 +322,49 @@ def uninstall_proxy(
     except ProxyError as e:
         console.error(str(e))
         raise typer.Exit(e.exit_code) from e
+
+
+@app.command("reset")
+@require_root
+def reset_proxy(
+    uninstall: bool = typer.Option(
+        False, "--uninstall", help="Also uninstall OpenResty package"
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview without executing"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
+    verbose: int = typer.Option(
+        0, "--verbose", "-v", count=True, help="Increase verbosity"
+    ),
+) -> None:
+    """Completely reset proxy configuration.
+
+    Stops service, removes all config files, API keys, and logs.
+    Use --uninstall to also remove the OpenResty package.
+
+    After reset, run 'sm proxy setup' to start fresh.
+
+    Examples:
+
+        sm proxy reset --force
+
+        sm proxy reset --uninstall --force
+    """
+    ctx = create_context(dry_run=dry_run, force=force, verbose=verbose)
+    executor, proxy = _get_service(ctx)
+
+    if not force and not dry_run:
+        msg = "This will remove ALL proxy configuration, API keys, and logs."
+        if uninstall:
+            msg += " OpenResty will also be uninstalled."
+        console.warn(msg)
+        confirm = typer.confirm("Are you sure you want to reset?")
+        if not confirm:
+            console.info("Cancelled")
+            return
+
+    try:
+        proxy.reset(uninstall_openresty=uninstall)
+        console.info("\nTo set up the proxy again, run: sm proxy setup")
+    except ProxyError as e:
+        console.error(str(e))
+        raise typer.Exit(e.exit_code) from e
