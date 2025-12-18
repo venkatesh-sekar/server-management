@@ -668,7 +668,6 @@ def create_readonly_user(
                 "User": f"{username} (read-only)",
                 "Password file": str(pass_file),
             },
-            success=True,
         )
 
     except PostgresError as e:
