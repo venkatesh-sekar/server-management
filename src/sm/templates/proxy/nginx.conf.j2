@@ -179,23 +179,8 @@ http {
 
 {% endfor %}
 {% else %}
-    # No endpoints configured
+    # No endpoints configured - proxy is in standby mode
     # Use: sm proxy endpoint add --name <name> --listen-port <port> --upstream <host:port>
-
-    server {
-        listen 8080;
-        server_name _;
-
-        location / {
-            default_type application/json;
-            return 503 '{"error":"no_endpoints","message":"No proxy endpoints configured"}';
-        }
-
-        location /health {
-            access_log off;
-            default_type application/json;
-            return 200 '{"status":"ok","endpoints":0}';
-        }
-    }
+    # Note: No server blocks defined until endpoints are added to avoid port conflicts
 {% endif %}
 }
