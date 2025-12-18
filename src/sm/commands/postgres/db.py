@@ -6,6 +6,7 @@ Commands:
 - sm postgres db list
 - sm postgres db grant
 - sm postgres db drop
+- sm postgres db reset
 """
 
 from enum import Enum
@@ -776,5 +777,166 @@ def drop_database(
 
     except PostgresError as e:
         audit.log_failure(AuditEventType.DATABASE_DROP, "database", name, str(e))
+        console.error(str(e))
+        raise typer.Exit(10)
+
+
+@app.command("reset")
+@require_root
+@require_force("Resetting databases permanently deletes all data including tables, views, functions, and triggers")
+def reset_database(
+    name: str = typer.Option(
+        ..., "--database", "-d",
+        help="Database name to reset",
+    ),
+    confirm_name: Optional[str] = typer.Option(
+        None, "--confirm-name",
+        help="Confirm database name (required for safety)",
+    ),
+    # Global options
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview without executing"),
+    force: bool = typer.Option(False, "--force", help="Allow dangerous operations"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmations"),
+    verbose: int = typer.Option(0, "--verbose", "-v", count=True, help="Increase verbosity"),
+) -> None:
+    """Reset a PostgreSQL database by dropping ALL objects.
+
+    CRITICAL: This permanently deletes ALL data, tables, views, functions,
+    triggers, sequences, types, indexes, and extensions. The database name
+    and user permissions are preserved.
+
+    Requires THREE safety confirmations:
+
+    1. --force flag
+
+    2. --confirm-name=<database> parameter
+
+    3. Interactive prompt to TYPE the exact database name
+
+    No backup is created - ensure you have your own backup before proceeding.
+
+    Example:
+
+        sm postgres db reset -d testdb --force --confirm-name=testdb
+
+        # Preview what would be dropped
+
+        sm postgres db reset -d testdb --dry-run
+    """
+    ctx = create_context(
+        dry_run=dry_run,
+        force=force,
+        yes=yes,
+        verbose=verbose,
+        confirm_name=confirm_name,
+    )
+    audit = get_audit_logger()
+
+    # Validate database name
+    try:
+        validate_identifier(name, "database")
+    except ValidationError as e:
+        console.error(str(e))
+        raise typer.Exit(3)
+
+    # Safety check: --confirm-name must match
+    if confirm_name != name:
+        console.error(f"--confirm-name must match database name '{name}'")
+        console.error(f"Use: --confirm-name={name}")
+        raise typer.Exit(4)
+
+    # Safety check: protected database
+    try:
+        check_not_protected_database(name)
+    except Exception as e:
+        console.error(str(e))
+        audit.log_blocked("reset_database", str(e), "database", name)
+        raise typer.Exit(4)
+
+    # Run preflight checks
+    run_preflight_checks(dry_run=ctx.dry_run, verbose=ctx.is_verbose)
+
+    # Get services
+    executor, pg, pgb = _get_services(ctx)
+
+    # Check database exists
+    if not pg.database_exists(name):
+        console.error(f"Database '{name}' does not exist")
+        raise typer.Exit(1)
+
+    # Get object counts for display
+    counts = pg._get_object_counts(name) if not dry_run else {}
+    total_objects = sum(counts.values()) if counts else 0
+
+    # Display warning and summary
+    console.print()
+    console.print("[bold red]" + "=" * 60 + "[/bold red]")
+    console.print("[bold red]  CRITICAL: DATABASE RESET OPERATION[/bold red]")
+    console.print("[bold red]" + "=" * 60 + "[/bold red]")
+    console.print()
+    console.print(f"  Database: [bold]{name}[/bold]")
+    console.print()
+
+    if counts:
+        console.print("  [bold]Objects to be PERMANENTLY DELETED:[/bold]")
+        if counts.get("tables", 0):
+            console.print(f"    Tables:              {counts['tables']}")
+        if counts.get("views", 0):
+            console.print(f"    Views:               {counts['views']}")
+        if counts.get("materialized_views", 0):
+            console.print(f"    Materialized Views:  {counts['materialized_views']}")
+        if counts.get("indexes", 0):
+            console.print(f"    Indexes:             {counts['indexes']}")
+        if counts.get("sequences", 0):
+            console.print(f"    Sequences:           {counts['sequences']}")
+        if counts.get("functions", 0):
+            console.print(f"    Functions:           {counts['functions']}")
+        if counts.get("triggers", 0):
+            console.print(f"    Triggers:            {counts['triggers']}")
+        if counts.get("types", 0):
+            console.print(f"    Custom Types:        {counts['types']}")
+        if counts.get("extensions", 0):
+            console.print(f"    Extensions:          {counts['extensions']}")
+        console.print()
+        console.print(f"  [bold red]TOTAL: {total_objects} objects will be deleted[/bold red]")
+    elif not dry_run:
+        console.print("  [dim]No objects found in database (may already be empty)[/dim]")
+
+    console.print()
+    console.print("[bold yellow]  WARNING: No backup will be created![/bold yellow]")
+    console.print("[yellow]  Ensure you have your own backup before proceeding.[/yellow]")
+    console.print()
+    console.print("[bold red]" + "=" * 60 + "[/bold red]")
+    console.print()
+
+    # Safety check: Interactive confirmation requiring exact name
+    if not yes and not dry_run:
+        if not console.confirm_critical(
+            operation=f"reset database '{name}' (DELETE ALL {total_objects} OBJECTS)",
+            resource_name=name,
+        ):
+            console.warn("Operation cancelled")
+            raise typer.Exit(0)
+
+    try:
+        # Execute reset
+        pg.reset_database(name, force=True)
+
+        # Log success
+        audit.log_success(
+            AuditEventType.DATABASE_MODIFY,
+            "database",
+            name,
+            message=f"Database reset: {total_objects} objects dropped",
+        )
+
+        # Summary
+        console.print()
+        console.success(f"Database '{name}' reset successfully")
+        console.print(f"  Objects dropped: {total_objects}")
+        console.print(f"  Status: All schemas recreated empty")
+
+    except PostgresError as e:
+        audit.log_failure(AuditEventType.DATABASE_MODIFY, "database", name, str(e))
         console.error(str(e))
         raise typer.Exit(10)

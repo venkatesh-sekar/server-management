@@ -265,6 +265,199 @@ class PostgreSQLService:
 
         self.ctx.console.success(f"Database '{name}' dropped")
 
+    def _get_object_counts(self, database: str) -> dict[str, int]:
+        """Get counts of objects in a database for reporting.
+
+        Args:
+            database: Database name
+
+        Returns:
+            Dictionary with counts by object type
+        """
+        if self.ctx.dry_run:
+            return {}
+
+        # Query all object counts in a single SQL statement
+        result = self._run_sql(
+            """
+            SELECT
+                (SELECT count(*) FROM pg_tables
+                 WHERE schemaname NOT LIKE 'pg_%'
+                 AND schemaname != 'information_schema') as tables,
+                (SELECT count(*) FROM pg_views
+                 WHERE schemaname NOT LIKE 'pg_%'
+                 AND schemaname != 'information_schema') as views,
+                (SELECT count(*) FROM pg_matviews
+                 WHERE schemaname NOT LIKE 'pg_%'
+                 AND schemaname != 'information_schema') as matviews,
+                (SELECT count(*) FROM pg_indexes
+                 WHERE schemaname NOT LIKE 'pg_%'
+                 AND schemaname != 'information_schema') as indexes,
+                (SELECT count(*) FROM pg_sequences
+                 WHERE schemaname NOT LIKE 'pg_%'
+                 AND schemaname != 'information_schema') as sequences,
+                (SELECT count(*) FROM pg_proc p
+                 JOIN pg_namespace n ON p.pronamespace = n.oid
+                 WHERE n.nspname NOT LIKE 'pg_%'
+                 AND n.nspname != 'information_schema') as functions,
+                (SELECT count(*) FROM pg_trigger t
+                 JOIN pg_class c ON t.tgrelid = c.oid
+                 JOIN pg_namespace n ON c.relnamespace = n.oid
+                 WHERE n.nspname NOT LIKE 'pg_%'
+                 AND n.nspname != 'information_schema'
+                 AND NOT t.tgisinternal) as triggers,
+                (SELECT count(*) FROM pg_type t
+                 JOIN pg_namespace n ON t.typnamespace = n.oid
+                 WHERE n.nspname NOT LIKE 'pg_%'
+                 AND n.nspname != 'information_schema'
+                 AND t.typtype IN ('c', 'e', 'd')) as types,
+                (SELECT count(*) FROM pg_extension
+                 WHERE extname != 'plpgsql') as extensions
+            """,
+            database=database,
+            description="Count database objects",
+            check=False,
+        )
+
+        # Parse pipe-separated results
+        parts = result.strip().split("|")
+        if len(parts) >= 9:
+            return {
+                "tables": int(parts[0].strip() or 0),
+                "views": int(parts[1].strip() or 0),
+                "materialized_views": int(parts[2].strip() or 0),
+                "indexes": int(parts[3].strip() or 0),
+                "sequences": int(parts[4].strip() or 0),
+                "functions": int(parts[5].strip() or 0),
+                "triggers": int(parts[6].strip() or 0),
+                "types": int(parts[7].strip() or 0),
+                "extensions": int(parts[8].strip() or 0),
+            }
+        return {}
+
+    def reset_database(self, name: str, *, force: bool = False) -> dict[str, int]:
+        """Reset a PostgreSQL database by dropping all objects.
+
+        This drops ALL objects in the database including:
+        - Tables (and their data)
+        - Views (regular and materialized)
+        - Functions and procedures
+        - Sequences
+        - Types (custom types, enums, domains)
+        - Triggers
+        - Indexes
+        - Extensions (user-installed)
+        - Schemas (except public, which is recreated)
+
+        Preserves:
+        - The database itself
+        - User roles and permissions
+        - The public schema (recreated empty)
+
+        Args:
+            name: Database name
+            force: Terminate existing connections first
+
+        Returns:
+            Dictionary with counts of dropped objects by type
+
+        Raises:
+            PostgresError: If reset fails
+        """
+        validate_identifier(name, "database")
+
+        if not self.database_exists(name):
+            raise PostgresError(
+                f"Database '{name}' does not exist",
+                hint="Check database name with: sm postgres db list",
+            )
+
+        # Get object counts before reset
+        counts = self._get_object_counts(name)
+
+        # Safety verification: confirm we're about to operate on the correct database
+        # This is defense in depth - verify the database name matches what we expect
+        verify_result = self._run_sql(
+            "SELECT current_database()",
+            database=name,
+            description=f"Verify connection to '{name}'",
+        )
+        current_db = verify_result.strip()
+        if current_db != name:
+            raise PostgresError(
+                f"Safety check failed: connected to '{current_db}' but expected '{name}'",
+                hint="This is a critical safety error. Please report this issue.",
+            )
+
+        if force:
+            # Terminate all connections
+            self._run_sql(
+                f"""
+                SELECT pg_terminate_backend(pid)
+                FROM pg_stat_activity
+                WHERE datname = '{name}'
+                AND pid <> pg_backend_pid()
+                """,
+                description=f"Terminate connections to '{name}'",
+                check=False,
+            )
+
+        self.ctx.console.step(f"Resetting database '{name}'")
+
+        # Get database owner for recreating public schema
+        owner_result = self._run_sql(
+            f"SELECT pg_catalog.pg_get_userbyid(datdba) FROM pg_database WHERE datname = '{name}'",
+            description="Get database owner",
+        )
+        db_owner = owner_result.strip() or "postgres"
+
+        # Get all user-created schemas
+        schemas_result = self._run_sql(
+            """
+            SELECT nspname FROM pg_namespace
+            WHERE nspname NOT LIKE 'pg_%'
+            AND nspname != 'information_schema'
+            ORDER BY nspname
+            """,
+            database=name,
+            description="List schemas",
+        )
+        schemas = [s.strip() for s in schemas_result.strip().splitlines() if s.strip()]
+
+        # Drop all schemas with CASCADE
+        for schema in schemas:
+            self.ctx.console.step(f"Dropping schema '{schema}'...")
+            self._run_sql(
+                f'DROP SCHEMA IF EXISTS "{schema}" CASCADE',
+                database=name,
+                description=f"Drop schema '{schema}'",
+            )
+
+        # Recreate public schema with proper ownership
+        self.ctx.console.step("Recreating public schema...")
+        self._run_sql(
+            f"""
+            CREATE SCHEMA public;
+            ALTER SCHEMA public OWNER TO "{db_owner}";
+            COMMENT ON SCHEMA public IS 'Standard public schema';
+            """,
+            database=name,
+            description="Recreate public schema",
+        )
+
+        # Re-grant default privileges on public
+        self._run_sql(
+            """
+            GRANT USAGE ON SCHEMA public TO PUBLIC;
+            """,
+            database=name,
+            description="Grant default public schema privileges",
+        )
+
+        self.ctx.console.success(f"Database '{name}' reset successfully")
+
+        return counts
+
     def list_databases(self) -> list[DatabaseInfo]:
         """List all databases.
 
