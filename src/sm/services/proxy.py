@@ -192,6 +192,10 @@ class ProxyService:
         keyring_dir.mkdir(parents=True, exist_ok=True)
         keyring_file = keyring_dir / "openresty.gpg"
 
+        # Remove existing keyring file if present (from previous failed attempts)
+        if keyring_file.exists():
+            keyring_file.unlink()
+
         # Download and dearmor the GPG key
         self.executor.run(
             ["bash", "-c",
