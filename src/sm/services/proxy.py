@@ -21,7 +21,7 @@ from jinja2 import Environment, PackageLoader, select_autoescape
 
 from sm.core.config import ProxyConfig, ProxyEndpoint
 from sm.core.context import ExecutionContext
-from sm.core.exceptions import ProxyError
+from sm.core.exceptions import ExecutionError, ProxyError
 from sm.core.executor import CommandExecutor, RollbackStack
 
 # Configuration paths
@@ -180,12 +180,28 @@ class ProxyService:
         )
         codename = result.stdout.strip()
 
+        self.ctx.console.debug(f"Detected distro: {distro}, codename: {codename}")
+
+        # Supported codenames by OpenResty
+        supported_ubuntu = {"focal", "jammy", "noble"}  # 20.04, 22.04, 24.04
+        supported_debian = {"bullseye", "bookworm"}  # 11, 12
+
         # Determine repository URL based on distribution
         if distro == "debian":
             repo_url = "https://openresty.org/package/debian"
+            if codename not in supported_debian:
+                self.ctx.console.warn(
+                    f"Codename '{codename}' may not be supported by OpenResty. "
+                    f"Supported: {', '.join(sorted(supported_debian))}"
+                )
         else:
             # Default to Ubuntu (also works for Ubuntu derivatives)
             repo_url = "https://openresty.org/package/ubuntu"
+            if codename not in supported_ubuntu:
+                self.ctx.console.warn(
+                    f"Codename '{codename}' may not be supported by OpenResty. "
+                    f"Supported: {', '.join(sorted(supported_ubuntu))}"
+                )
 
         # Import GPG key (modern signed-by approach)
         keyring_dir = Path("/etc/apt/keyrings")
@@ -214,8 +230,32 @@ class ProxyService:
         self._write_file_atomic(repo_file, repo_line + "\n")
 
         # Update and install
-        self.executor.run(["apt-get", "update"], check=True)
-        self.executor.run(["apt-get", "install", "-y", "openresty"], check=True)
+        update_result = self.executor.run(["apt-get", "update"], check=True)
+
+        # Check for repository errors in apt-get update output
+        if update_result.stderr and "404" in update_result.stderr:
+            self.ctx.console.warn(
+                f"Repository may not exist for {distro}/{codename}. "
+                "Check https://openresty.org/en/linux-packages.html for supported versions."
+            )
+
+        try:
+            self.executor.run(["apt-get", "install", "-y", "openresty"], check=True)
+        except ExecutionError as e:
+            # Provide more helpful error message
+            raise ProxyError(
+                f"Failed to install OpenResty for {distro}/{codename}",
+                hint=(
+                    f"OpenResty may not support '{codename}'. "
+                    "Check https://openresty.org/en/linux-packages.html for supported versions."
+                ),
+                details=[
+                    f"Distribution: {distro}",
+                    f"Codename: {codename}",
+                    f"Repository: {repo_url}",
+                    e.stderr or "No error output",
+                ],
+            ) from e
 
         if rollback:
             rollback.add(
