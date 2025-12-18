@@ -12,15 +12,15 @@ import json
 import os
 import pwd
 import uuid
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Generator, Optional
+from typing import Any
 
 from sm.core.output import console
-
 
 # Default paths
 DEFAULT_LOG_PATH = Path("/var/log/sm/audit.log")
@@ -93,6 +93,15 @@ class AuditEventType(Enum):
     FIREWALL_EXCLUSIVE = "firewall.exclusive"
     FIREWALL_IMPORT = "firewall.import"
 
+    # Proxy operations
+    PROXY_SETUP = "proxy.setup"
+    PROXY_ENDPOINT_ADD = "proxy.endpoint_add"
+    PROXY_ENDPOINT_REMOVE = "proxy.endpoint_remove"
+    PROXY_KEY_CREATE = "proxy.key_create"
+    PROXY_KEY_ROTATE = "proxy.key_rotate"
+    PROXY_KEY_REVOKE = "proxy.key_revoke"
+    PROXY_KEY_DELETE = "proxy.key_delete"
+
     # Extension operations
     EXTENSION_ENABLE = "extension.enable"
     EXTENSION_DISABLE = "extension.disable"
@@ -151,27 +160,27 @@ class AuditEvent:
     # Actor information
     actor_uid: int = field(default_factory=os.getuid)
     actor_username: str = field(default_factory=lambda: pwd.getpwuid(os.getuid()).pw_name)
-    actor_sudo_user: Optional[str] = field(default_factory=lambda: os.environ.get("SUDO_USER"))
+    actor_sudo_user: str | None = field(default_factory=lambda: os.environ.get("SUDO_USER"))
 
     # Target information
-    target_type: Optional[str] = None
-    target_name: Optional[str] = None
+    target_type: str | None = None
+    target_name: str | None = None
 
     # Operation details
-    operation: Optional[str] = None
+    operation: str | None = None
     parameters: dict[str, Any] = field(default_factory=dict)
 
     # Result details
-    message: Optional[str] = None
-    error: Optional[str] = None
+    message: str | None = None
+    error: str | None = None
 
     # Rollback information
     rollback_possible: bool = False
-    rollback_command: Optional[str] = None
+    rollback_command: str | None = None
 
     # Correlation
-    session_id: Optional[str] = None
-    correlation_id: Optional[str] = None
+    session_id: str | None = None
+    correlation_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -217,7 +226,7 @@ class AuditLogger:
 
     def __init__(
         self,
-        log_path: Optional[Path] = None,
+        log_path: Path | None = None,
         max_size_mb: int = DEFAULT_MAX_SIZE_MB,
         backup_count: int = DEFAULT_BACKUP_COUNT,
         enabled: bool = True,
@@ -281,7 +290,7 @@ class AuditLogger:
         try:
             with self._atomic_append() as f:
                 f.write(log_line)
-        except (OSError, IOError) as e:
+        except OSError as e:
             console.debug(f"Failed to write audit log: {e}")
             return
 
@@ -359,10 +368,10 @@ class AuditLogger:
         target_type: str,
         target_name: str,
         operation: str,
-        parameters: Optional[dict[str, Any]] = None,
-        message: Optional[str] = None,
-        error: Optional[str] = None,
-        rollback_command: Optional[str] = None,
+        parameters: dict[str, Any] | None = None,
+        message: str | None = None,
+        error: str | None = None,
+        rollback_command: str | None = None,
     ) -> None:
         """Log an operation with common fields."""
         event = AuditEvent(
@@ -400,8 +409,8 @@ class AuditLogger:
         self,
         operation: str,
         reason: str,
-        target_type: Optional[str] = None,
-        target_name: Optional[str] = None,
+        target_type: str | None = None,
+        target_name: str | None = None,
     ) -> None:
         """Log a blocked operation."""
         self.log(AuditEvent(
@@ -418,7 +427,7 @@ class AuditLogger:
         event_type: AuditEventType,
         target_type: str,
         target_name: str,
-        message: Optional[str] = None,
+        message: str | None = None,
     ) -> None:
         """Log a successful operation."""
         self.log(AuditEvent(
@@ -450,7 +459,7 @@ class AuditLogger:
         event_type: AuditEventType,
         target_type: str,
         target_name: str,
-        message: Optional[str] = None,
+        message: str | None = None,
     ) -> None:
         """Log a dry-run operation."""
         self.log(AuditEvent(
@@ -463,7 +472,7 @@ class AuditLogger:
 
 
 # Global audit logger instance
-_audit_logger: Optional[AuditLogger] = None
+_audit_logger: AuditLogger | None = None
 
 
 def get_audit_logger() -> AuditLogger:
@@ -475,7 +484,7 @@ def get_audit_logger() -> AuditLogger:
 
 
 def configure_audit_logger(
-    log_path: Optional[Path] = None,
+    log_path: Path | None = None,
     enabled: bool = True,
 ) -> AuditLogger:
     """Configure and return the global audit logger."""

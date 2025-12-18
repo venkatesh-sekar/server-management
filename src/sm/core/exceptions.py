@@ -235,3 +235,15 @@ class MongoDBError(SMError):
     - Database/user operations fail
     """
     exit_code = 16
+
+
+class ProxyError(SMError):
+    """Proxy-specific errors.
+
+    Raised when:
+    - OpenResty installation fails
+    - Nginx configuration is invalid
+    - API key operations fail
+    - Endpoint management fails
+    """
+    exit_code = 17

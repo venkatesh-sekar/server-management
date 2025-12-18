@@ -9,14 +9,14 @@ Provides:
 """
 
 from enum import IntEnum
-from typing import Any, Optional
+from typing import Any
 
+from rich import box
 from rich.console import Console as RichConsole
 from rich.panel import Panel
-from rich.table import Table
-from rich.syntax import Syntax
 from rich.progress import Progress, SpinnerColumn, TextColumn
-from rich import box
+from rich.syntax import Syntax
+from rich.table import Table
 
 
 class Verbosity(IntEnum):
@@ -103,8 +103,8 @@ class Console:
         self._console.print(f"[cyan]Hint:[/cyan] {message}")
 
     # Structured output
-    def print(self, message: str = "", **kwargs: Any) -> None:
-        """Print raw message with Rich formatting."""
+    def print(self, message: Any = "", **kwargs: Any) -> None:
+        """Print raw message or Rich renderable with formatting."""
         self._console.print(message, **kwargs)
 
     def rule(self, title: str = "") -> None:
@@ -114,7 +114,7 @@ class Console:
     def panel(
         self,
         content: str,
-        title: Optional[str] = None,
+        title: str | None = None,
         border_style: str = "blue",
     ) -> None:
         """Print content in a panel."""

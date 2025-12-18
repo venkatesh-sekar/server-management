@@ -208,6 +208,97 @@ class ObservabilityConfig(BaseModel):
         return v
 
 
+class ProxyEndpoint(BaseModel):
+    """Configuration for a single proxy endpoint."""
+
+    name: str = Field(..., min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    listen_port: int = Field(..., ge=1, le=65535)
+    upstream: str  # host:port format
+    protocol: str = "http"  # "http" or "grpc"
+    require_auth: bool = True
+    allowed_methods: list[str] = Field(default_factory=list)
+    health_check_path: str = "/health"
+
+    @field_validator("listen_port")
+    @classmethod
+    def validate_listen_port(cls, v: int) -> int:
+        return validate_port(v)
+
+    @field_validator("protocol")
+    @classmethod
+    def validate_protocol(cls, v: str) -> str:
+        valid_protocols = {"http", "grpc"}
+        if v not in valid_protocols:
+            raise ValueError(f"Protocol must be one of: {sorted(valid_protocols)}")
+        return v
+
+    @field_validator("upstream")
+    @classmethod
+    def validate_upstream(cls, v: str) -> str:
+        if ":" not in v:
+            raise ValueError("Upstream must be in host:port format (e.g., localhost:4317)")
+        host, port_str = v.rsplit(":", 1)
+        if not host:
+            raise ValueError("Upstream host cannot be empty")
+        try:
+            port = int(port_str)
+            validate_port(port)
+        except ValueError:
+            raise ValueError(f"Invalid upstream port: {port_str}")
+        return v
+
+
+class ProxyRateLimitConfig(BaseModel):
+    """Rate limiting configuration for the proxy."""
+
+    enabled: bool = True
+    default_requests_per_minute: int = Field(default=1000, ge=1, le=100000)
+    burst: int = Field(default=100, ge=1, le=10000)
+
+
+class ProxyConfig(BaseModel):
+    """Reverse proxy configuration for securing endpoints."""
+
+    enabled: bool = False
+    bind_address: str = "0.0.0.0"
+    worker_processes: str = "auto"
+    worker_connections: int = Field(default=4096, ge=256, le=65535)
+    client_max_body_size: str = "10m"
+    proxy_connect_timeout: int = Field(default=5, ge=1, le=300)
+    proxy_read_timeout: int = Field(default=60, ge=1, le=3600)
+    rate_limit: ProxyRateLimitConfig = Field(default_factory=ProxyRateLimitConfig)
+    endpoints: list[ProxyEndpoint] = Field(default_factory=list)
+
+    @field_validator("bind_address")
+    @classmethod
+    def validate_bind_address(cls, v: str) -> str:
+        # Allow "0.0.0.0", "127.0.0.1", or valid IP addresses
+        if v in ("0.0.0.0", "127.0.0.1", "localhost"):
+            return v
+        # Basic IPv4 validation
+        parts = v.split(".")
+        if len(parts) == 4:
+            try:
+                if all(0 <= int(p) <= 255 for p in parts):
+                    return v
+            except ValueError:
+                pass
+        raise ValueError(f"Invalid bind address: {v}")
+
+    @field_validator("worker_processes")
+    @classmethod
+    def validate_worker_processes(cls, v: str) -> str:
+        if v == "auto":
+            return v
+        try:
+            num = int(v)
+            if num < 1 or num > 128:
+                raise ValueError("Worker processes must be between 1 and 128")
+            return v
+        except ValueError:
+            raise ValueError("Worker processes must be 'auto' or a number between 1-128")
+
+
 class MachineConfig(BaseModel):
     """Root configuration model for a single machine.
 
@@ -228,6 +319,7 @@ class MachineConfig(BaseModel):
     mongo_export: MongoExportConfig = Field(default_factory=MongoExportConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+    proxy: ProxyConfig = Field(default_factory=ProxyConfig)
 
     @field_validator("environment")
     @classmethod
@@ -394,6 +486,11 @@ class AppConfig:
     def observability(self) -> ObservabilityConfig:
         """Shortcut to observability config."""
         return self._config.observability
+
+    @property
+    def proxy(self) -> ProxyConfig:
+        """Shortcut to proxy config."""
+        return self._config.proxy
 
     @property
     def is_production(self) -> bool:

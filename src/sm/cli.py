@@ -83,6 +83,7 @@ from sm.commands.mongodb.user import app as mongodb_user_app
 from sm.commands.mongodb.db import app as mongodb_db_app
 from sm.commands.mongodb.backup import app as mongodb_backup_app
 from sm.commands.mongodb.restore import app as mongodb_restore_app
+from sm.commands.proxy import app as proxy_app
 
 # Register postgres sub-commands
 postgres_app.add_typer(postgres_user_app, name="user")
@@ -107,6 +108,7 @@ app.add_typer(observability_app, name="observability")
 app.add_typer(config_app, name="config")
 app.add_typer(docker_commands_app, name="docker")
 app.add_typer(firewall_app, name="firewall")
+app.add_typer(proxy_app, name="proxy")
 
 
 # Type aliases for common options

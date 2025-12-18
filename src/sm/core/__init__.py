@@ -15,6 +15,7 @@ from sm.core.exceptions import (
     RollbackError,
     FirewallError,
     MongoDBError,
+    ProxyError,
 )
 
 from sm.core.context import ExecutionContext, create_context
@@ -50,6 +51,7 @@ __all__ = [
     "RollbackError",
     "FirewallError",
     "MongoDBError",
+    "ProxyError",
     # Context
     "ExecutionContext",
     "create_context",
