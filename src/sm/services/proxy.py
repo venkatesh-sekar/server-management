@@ -180,15 +180,24 @@ class ProxyService:
         )
         codename = result.stdout.strip()
 
-        self.ctx.console.debug(f"Detected distro: {distro}, codename: {codename}")
+        # Detect architecture
+        arch_result = self.executor.run(["dpkg", "--print-architecture"], check=True)
+        arch = arch_result.stdout.strip()
+
+        self.ctx.console.debug(f"Detected distro: {distro}, codename: {codename}, arch: {arch}")
 
         # Supported codenames by OpenResty
         supported_ubuntu = {"focal", "jammy", "noble"}  # 20.04, 22.04, 24.04
         supported_debian = {"bullseye", "bookworm"}  # 11, 12
 
-        # Determine repository URL based on distribution
+        # Determine repository URL based on distribution and architecture
+        # OpenResty uses http:// and has separate arm64 repos
         if distro == "debian":
-            repo_url = "https://openresty.org/package/debian"
+            if arch == "arm64":
+                repo_url = "http://openresty.org/package/arm64/debian"
+            else:
+                repo_url = "http://openresty.org/package/debian"
+            component = "openresty"  # Debian uses 'openresty' component
             if codename not in supported_debian:
                 self.ctx.console.warn(
                     f"Codename '{codename}' may not be supported by OpenResty. "
@@ -196,15 +205,19 @@ class ProxyService:
                 )
         else:
             # Default to Ubuntu (also works for Ubuntu derivatives)
-            repo_url = "https://openresty.org/package/ubuntu"
+            if arch == "arm64":
+                repo_url = "http://openresty.org/package/arm64/ubuntu"
+            else:
+                repo_url = "http://openresty.org/package/ubuntu"
+            component = "main"  # Ubuntu uses 'main' component
             if codename not in supported_ubuntu:
                 self.ctx.console.warn(
                     f"Codename '{codename}' may not be supported by OpenResty. "
                     f"Supported: {', '.join(sorted(supported_ubuntu))}"
                 )
 
-        # Import GPG key (modern signed-by approach)
-        keyring_dir = Path("/etc/apt/keyrings")
+        # Import GPG key - use trusted.gpg.d for broader compatibility
+        keyring_dir = Path("/etc/apt/trusted.gpg.d")
         keyring_dir.mkdir(parents=True, exist_ok=True)
         keyring_file = keyring_dir / "openresty.gpg"
 
@@ -220,11 +233,8 @@ class ProxyService:
             check=True,
         )
 
-        # Add repository with signed-by
-        repo_line = (
-            f"deb [signed-by={keyring_file}] "
-            f"{repo_url} {codename} main"
-        )
+        # Add repository (no signed-by needed when using trusted.gpg.d)
+        repo_line = f"deb {repo_url} {codename} {component}"
         repo_file = Path("/etc/apt/sources.list.d/openresty.list")
 
         self._write_file_atomic(repo_file, repo_line + "\n")
@@ -244,7 +254,7 @@ class ProxyService:
         except ExecutionError as e:
             # Provide more helpful error message
             raise ProxyError(
-                f"Failed to install OpenResty for {distro}/{codename}",
+                f"Failed to install OpenResty for {distro}/{codename} ({arch})",
                 hint=(
                     f"OpenResty may not support '{codename}'. "
                     "Check https://openresty.org/en/linux-packages.html for supported versions."
@@ -252,7 +262,8 @@ class ProxyService:
                 details=[
                     f"Distribution: {distro}",
                     f"Codename: {codename}",
-                    f"Repository: {repo_url}",
+                    f"Architecture: {arch}",
+                    f"Repository: {repo_url} {codename} {component}",
                     e.stderr or "No error output",
                 ],
             ) from e
