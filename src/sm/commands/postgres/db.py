@@ -597,7 +597,6 @@ def create_readonly_user(
                     "User": f"{username} (read-only)",
                     "Status": "User exists, grants verified",
                 },
-                success=True,
             )
             return
 
