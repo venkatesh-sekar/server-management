@@ -181,7 +181,6 @@ def create_database(
         console.summary(
             "Database Created",
             summary_data,
-            success=True,
         )
 
     except PostgresError as e:
@@ -491,7 +490,6 @@ def grant_access(
                 "User": username,
                 "Access": access.value,
             },
-            success=True,
         )
 
     except PostgresError as e:

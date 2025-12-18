@@ -136,7 +136,6 @@ def enable_extension(
                 "Extension": extension,
                 "Schema": schema,
             },
-            success=True,
         )
 
     except PostgresError as e:

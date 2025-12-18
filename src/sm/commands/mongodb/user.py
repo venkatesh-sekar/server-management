@@ -161,7 +161,6 @@ def create_user(
                 "Roles": roles_display,
                 "Password file": str(creds.get_password_path(username, database)),
             },
-            success=True,
         )
 
     except MongoDBError as e:
@@ -274,7 +273,6 @@ def rotate_password(
                 "Auth DB": database,
                 "Password file": str(creds.get_password_path(username, database)),
             },
-            success=True,
         )
 
     except MongoDBError as e:

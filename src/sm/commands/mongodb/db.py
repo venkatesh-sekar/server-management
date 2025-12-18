@@ -239,7 +239,6 @@ def create_database_with_user(
                 "Password file": str(pass_file),
                 "Connection": f"mongodb://{username}:***@127.0.0.1:27017/{database}?authSource=admin",
             },
-            success=True,
         )
 
     except MongoDBError as e:
