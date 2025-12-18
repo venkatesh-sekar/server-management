@@ -3,6 +3,7 @@
 Commands:
 - sm postgres user create
 - sm postgres user list
+- sm postgres user verify
 - sm postgres user rotate-password
 - sm postgres user delete
 """
@@ -245,6 +246,139 @@ def list_users(
         )
 
     console.print(table)
+
+
+@app.command("verify")
+@require_root
+def verify_user(
+    username: str = typer.Option(
+        ..., "--user", "-u",
+        help="Username to verify",
+    ),
+    database: str = typer.Option(
+        ..., "--database", "-d",
+        help="Database to connect to",
+    ),
+    port: int = typer.Option(
+        5432, "--port", "-p",
+        help="PostgreSQL port (default: 5432, use 6432 for PgBouncer)",
+    ),
+    verbose: int = typer.Option(0, "--verbose", "-v", count=True, help="Increase verbosity"),
+) -> None:
+    """Verify a user can connect to a database.
+
+    Tests the connection using the stored password from the credential store.
+    Use different ports to test direct PostgreSQL (5432) or PgBouncer (6432).
+
+    Examples:
+
+        sm postgres user verify -u myapp_user -d myapp
+
+        sm postgres user verify -u myapp_user -d myapp --port 6432
+    """
+    ctx = create_context(verbose=verbose)
+    creds = get_credential_manager()
+
+    # Validate
+    try:
+        validate_identifier(username, "username")
+        validate_identifier(database, "database")
+    except ValidationError as e:
+        console.error(str(e))
+        raise typer.Exit(3)
+
+    # Get services
+    executor, pg, pgb = _get_services(ctx)
+
+    # Check user exists
+    if not pg.user_exists(username):
+        console.error(f"User '{username}' does not exist in PostgreSQL")
+        raise typer.Exit(1)
+
+    # Load password from credential store
+    password = creds.load_password(username, database)
+    if not password:
+        # Try global password
+        password = creds.load_password(username, None)
+
+    if not password:
+        console.error(f"No stored password found for '{username}'")
+        console.hint(f"Expected at: {creds.get_password_path(username, database)}")
+        raise typer.Exit(1)
+
+    # Connection info
+    console.print()
+    console.print("[bold]Connection Verification[/bold]")
+    console.print(f"  User:     {username}")
+    console.print(f"  Database: {database}")
+    console.print(f"  Port:     {port}")
+    console.print(f"  Password: {'*' * min(len(password), 8)}... ({len(password)} chars)")
+    console.print()
+
+    # Test connection
+    try:
+        console.status(f"Testing connection to {database} on port {port}...")
+
+        # Use psql to test connection
+        import subprocess
+        env = {
+            "PGPASSWORD": password,
+            "PGCONNECT_TIMEOUT": "5",
+        }
+        result = subprocess.run(
+            [
+                "psql",
+                "-h", "127.0.0.1",
+                "-p", str(port),
+                "-U", username,
+                "-d", database,
+                "-c", "SELECT 1;",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={**subprocess.os.environ, **env},
+        )
+
+        if result.returncode == 0:
+            console.success(f"Connection verified successfully!")
+            console.print()
+            console.summary(
+                "Connection Details",
+                {
+                    "User": username,
+                    "Database": database,
+                    "Host": "127.0.0.1",
+                    "Port": port,
+                    "Status": "[green]Connected[/green]",
+                },
+            )
+        else:
+            console.error("Connection failed!")
+            if "password authentication failed" in result.stderr:
+                console.print()
+                console.print("[red]Password authentication failed[/red]")
+                console.hint("The stored password may be out of sync. Try rotating:")
+                console.hint(f"  sm postgres user rotate-password -u {username} -d {database}")
+            elif "does not exist" in result.stderr:
+                console.print()
+                console.print(f"[red]Database '{database}' does not exist[/red]")
+            else:
+                console.print()
+                console.print(f"[dim]{result.stderr.strip()}[/dim]")
+            raise typer.Exit(1)
+
+    except subprocess.TimeoutExpired:
+        console.error("Connection timed out")
+        console.hint(f"Check if PostgreSQL is running on port {port}")
+        raise typer.Exit(1)
+    except FileNotFoundError:
+        console.error("psql command not found")
+        console.hint("Ensure PostgreSQL client tools are installed")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.error(f"Connection test failed: {e}")
+        raise typer.Exit(1)
 
 
 @app.command("rotate-password")
