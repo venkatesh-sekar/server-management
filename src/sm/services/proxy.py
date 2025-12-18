@@ -167,12 +167,25 @@ class ProxyService:
             check=True,
         )
 
-        # Add OpenResty repository
+        # Detect distribution and codename
+        result = self.executor.run(
+            ["lsb_release", "-si"],
+            check=True,
+        )
+        distro = result.stdout.strip().lower()
+
         result = self.executor.run(
             ["lsb_release", "-cs"],
             check=True,
         )
         codename = result.stdout.strip()
+
+        # Determine repository URL based on distribution
+        if distro == "debian":
+            repo_url = "https://openresty.org/package/debian"
+        else:
+            # Default to Ubuntu (also works for Ubuntu derivatives)
+            repo_url = "https://openresty.org/package/ubuntu"
 
         # Import GPG key (modern signed-by approach)
         keyring_dir = Path("/etc/apt/keyrings")
@@ -190,7 +203,7 @@ class ProxyService:
         # Add repository with signed-by
         repo_line = (
             f"deb [signed-by={keyring_file}] "
-            f"https://openresty.org/package/ubuntu {codename} main"
+            f"{repo_url} {codename} main"
         )
         repo_file = Path("/etc/apt/sources.list.d/openresty.list")
 
