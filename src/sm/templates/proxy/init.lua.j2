@@ -4,9 +4,9 @@
 
 local cjson = require "cjson.safe"
 
--- API keys loaded from configuration
--- Format: { "sk_live_xxx": { name: "...", endpoints: [...], rate_limit: N, ... } }
-local keys_data = {{ keys }}
+-- API keys loaded from configuration (stored as JSON string, decoded at runtime)
+-- Format: { "sk_live_xxx": { "name": "...", "endpoints": [...], "rate_limit": N, ... } }
+local keys_json = [==[{{ keys }}]==]
 
 -- Load keys into shared dictionary
 local function load_keys()
@@ -16,12 +16,19 @@ local function load_keys()
     keys_dict:flush_all()
     keys_dict:flush_expired()
 
+    -- Parse JSON string into Lua table
+    local keys_data, err = cjson.decode(keys_json)
+    if not keys_data then
+        ngx.log(ngx.ERR, "Failed to parse API keys JSON: ", err)
+        return
+    end
+
     local count = 0
     for key, data in pairs(keys_data) do
         local json_data = cjson.encode(data)
-        local success, err = keys_dict:set(key, json_data)
+        local success, set_err = keys_dict:set(key, json_data)
         if not success then
-            ngx.log(ngx.ERR, "Failed to load API key '", data.name, "': ", err)
+            ngx.log(ngx.ERR, "Failed to load API key '", data.name, "': ", set_err)
         else
             count = count + 1
         end
