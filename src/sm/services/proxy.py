@@ -174,14 +174,24 @@ class ProxyService:
         )
         codename = result.stdout.strip()
 
-        # Import GPG key
+        # Import GPG key (modern signed-by approach)
+        keyring_dir = Path("/etc/apt/keyrings")
+        keyring_dir.mkdir(parents=True, exist_ok=True)
+        keyring_file = keyring_dir / "openresty.gpg"
+
+        # Download and dearmor the GPG key
         self.executor.run(
-            ["wget", "-qO", "-", "https://openresty.org/package/pubkey.gpg"],
+            ["bash", "-c",
+             f"wget -qO - https://openresty.org/package/pubkey.gpg | "
+             f"gpg --dearmor -o {keyring_file}"],
             check=True,
         )
 
-        # Add repository
-        repo_line = f"deb https://openresty.org/package/ubuntu {codename} main"
+        # Add repository with signed-by
+        repo_line = (
+            f"deb [signed-by={keyring_file}] "
+            f"https://openresty.org/package/ubuntu {codename} main"
+        )
         repo_file = Path("/etc/apt/sources.list.d/openresty.list")
 
         self._write_file_atomic(repo_file, repo_line + "\n")
@@ -226,6 +236,15 @@ class ProxyService:
             ["apt-get", "remove", "-y", "--purge", "openresty"],
             check=True,
         )
+
+        # Clean up repository and keyring
+        repo_file = Path("/etc/apt/sources.list.d/openresty.list")
+        keyring_file = Path("/etc/apt/keyrings/openresty.gpg")
+
+        if repo_file.exists():
+            repo_file.unlink()
+        if keyring_file.exists():
+            keyring_file.unlink()
 
         self.ctx.console.success("OpenResty uninstalled")
 
