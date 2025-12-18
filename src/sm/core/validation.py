@@ -330,15 +330,21 @@ def validate_path(
 
 
 # Password validation
-DEFAULT_PASSWORD_LENGTH = 32
-PASSWORD_ALPHABET = string.ascii_letters + string.digits + "!@#$%^&*()-_=+"
+# Use only alphanumeric characters to avoid encoding issues with special chars
+# Increased default length to 48 to compensate for reduced character set
+# 48 chars from 62-char alphabet = ~286 bits of entropy (very secure)
+DEFAULT_PASSWORD_LENGTH = 48
+PASSWORD_ALPHABET = string.ascii_letters + string.digits
 
 
 def generate_password(length: int = DEFAULT_PASSWORD_LENGTH) -> str:
     """Generate a cryptographically secure password.
 
+    Uses only alphanumeric characters (a-z, A-Z, 0-9) to avoid encoding
+    issues with special characters in connection strings, URLs, and configs.
+
     Args:
-        length: Password length (minimum 16)
+        length: Password length (minimum 16, default 48)
 
     Returns:
         Generated password
@@ -352,15 +358,14 @@ def generate_password(length: int = DEFAULT_PASSWORD_LENGTH) -> str:
             hint="Use a longer password for security",
         )
 
-    # Ensure at least one of each required character type
+    # Ensure at least one of each character type for compatibility
     password_chars = [
         secrets.choice(string.ascii_lowercase),
         secrets.choice(string.ascii_uppercase),
         secrets.choice(string.digits),
-        secrets.choice("!@#$%^&*()-_=+"),
     ]
 
-    # Fill remaining with random characters
+    # Fill remaining with random alphanumeric characters
     remaining = length - len(password_chars)
     password_chars.extend(
         secrets.choice(PASSWORD_ALPHABET) for _ in range(remaining)
@@ -381,7 +386,7 @@ def validate_password(
     require_uppercase: bool = True,
     require_lowercase: bool = True,
     require_digit: bool = True,
-    require_special: bool = True,
+    require_special: bool = False,
 ) -> str:
     """Validate password strength.
 
@@ -391,7 +396,8 @@ def validate_password(
         require_uppercase: Require at least one uppercase letter
         require_lowercase: Require at least one lowercase letter
         require_digit: Require at least one digit
-        require_special: Require at least one special character
+        require_special: Require at least one special character (default False
+            to avoid encoding issues with special chars)
 
     Returns:
         The validated password

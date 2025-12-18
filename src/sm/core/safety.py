@@ -18,6 +18,8 @@ from functools import wraps
 from pathlib import Path
 from typing import Callable, Optional, Any
 
+import typer
+
 from sm.core.exceptions import SafetyError, PrerequisiteError
 from sm.core.output import console
 
@@ -429,10 +431,9 @@ def require_root(func: Callable[..., Any]) -> Callable[..., Any]:
     @wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         if os.geteuid() != 0:
-            raise PrerequisiteError(
-                "This operation requires root privileges",
-                hint="Run with: sudo sm <command>",
-            )
+            console.error("This operation requires root privileges")
+            console.hint("Run with: sudo sm <command>")
+            raise typer.Exit(6)
         return func(*args, **kwargs)
     return wrapper
 
@@ -450,11 +451,9 @@ def require_force(reason: str) -> Callable[[Callable[..., Any]], Callable[..., A
                     force = ctx.force
 
             if not force:
-                raise SafetyError(
-                    f"Operation blocked: {reason}",
-                    required_flags=["--force"],
-                    hint="Use --force to proceed with this dangerous operation",
-                )
+                console.error(f"Operation blocked: {reason}")
+                console.hint("Use --force to proceed with this dangerous operation")
+                raise typer.Exit(5)
             return func(*args, **kwargs)
         return wrapper
     return decorator
@@ -475,17 +474,14 @@ def require_confirmation(
                 return func(*args, **kwargs)
 
             if not ctx.force:
-                raise SafetyError(
-                    f"Deleting {resource_type} requires --force flag",
-                    required_flags=["--force", f"--confirm-name={name}"],
-                )
+                console.error(f"Deleting {resource_type} requires --force flag")
+                console.hint(f"Use --force --confirm-name={name} to proceed")
+                raise typer.Exit(5)
 
             if ctx.confirm_name != name:
-                raise SafetyError(
-                    f"Name confirmation required for critical operation",
-                    hint=f"Use --confirm-name={name} to confirm deletion",
-                    required_flags=[f"--confirm-name={name}"],
-                )
+                console.error("Name confirmation required for critical operation")
+                console.hint(f"Use --confirm-name={name} to confirm deletion")
+                raise typer.Exit(5)
 
             return func(*args, **kwargs)
         return wrapper

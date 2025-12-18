@@ -189,7 +189,6 @@ def create_user(
                 "User": username,
                 "Password file": str(creds.get_password_path(username, database)),
             },
-            success=True,
         )
 
         if not dry_run:

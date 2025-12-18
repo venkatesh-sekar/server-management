@@ -246,9 +246,11 @@ class TestValidatePassword:
         assert any("digit" in d.lower() for d in exc.value.details)
 
     def test_missing_special(self):
-        """Passwords without special chars should fail."""
+        """Passwords without special chars should fail when required."""
+        # By default, special chars are NOT required (to avoid encoding issues)
+        # But when explicitly required, validation should fail
         with pytest.raises(ValidationError) as exc:
-            validate_password("NoSpecialChars123")
+            validate_password("NoSpecialChars123", require_special=True)
         assert any("special" in d.lower() for d in exc.value.details)
 
 
@@ -256,9 +258,9 @@ class TestGeneratePassword:
     """Tests for password generation."""
 
     def test_default_length(self):
-        """Default length should be 32."""
+        """Default length should be 48 (increased for alphanumeric-only passwords)."""
         password = generate_password()
-        assert len(password) == 32
+        assert len(password) == 48
 
     def test_custom_length(self):
         """Custom length should be respected."""
@@ -271,12 +273,16 @@ class TestGeneratePassword:
             generate_password(length=15)
 
     def test_password_contains_all_types(self):
-        """Generated password should contain all character types."""
+        """Generated password should contain alphanumeric character types.
+
+        Note: Special characters are NOT included to avoid encoding issues.
+        """
         password = generate_password()
         assert any(c.islower() for c in password)
         assert any(c.isupper() for c in password)
         assert any(c.isdigit() for c in password)
-        assert any(c in "!@#$%^&*()-_=+" for c in password)
+        # Verify NO special characters are included
+        assert all(c.isalnum() for c in password)
 
     def test_password_uniqueness(self):
         """Generated passwords should be unique."""
