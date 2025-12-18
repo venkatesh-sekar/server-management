@@ -49,7 +49,7 @@ http {
 
     # Security headers
     server_tokens off;
-    more_clear_headers 'Server';
+    # Note: Use 'more_clear_headers "Server"' if ngx_headers_more module is available
 
     # Performance
     sendfile on;
@@ -140,11 +140,13 @@ http {
         location {{ endpoint.health_check_path | default('/health') }} {
             access_log off;
 {% if endpoint.require_auth | default(true) %}
-            # Skip auth for health checks
-            set $api_key_name "health_check";
+            # Skip auth for health checks - use location-specific Lua to bypass
+            access_by_lua_block {
+                ngx.var.api_key_name = "health_check"
+            }
 {% endif %}
+            default_type application/json;
             return 200 '{"status":"ok","endpoint":"{{ endpoint.name }}"}';
-            add_header Content-Type application/json;
         }
 
 {% if endpoint.protocol == 'grpc' %}
@@ -185,14 +187,14 @@ http {
         server_name _;
 
         location / {
+            default_type application/json;
             return 503 '{"error":"no_endpoints","message":"No proxy endpoints configured"}';
-            add_header Content-Type application/json;
         }
 
         location /health {
             access_log off;
+            default_type application/json;
             return 200 '{"status":"ok","endpoints":0}';
-            add_header Content-Type application/json;
         }
     }
 {% endif %}
