@@ -19,6 +19,7 @@ from sm.core import (
     CommandExecutor,
     ExecutionContext,
     ProxyError,
+    SMError,
     console,
     create_context,
     get_audit_logger,
@@ -99,7 +100,7 @@ def setup_proxy(
             )
         )
 
-    except ProxyError as e:
+    except SMError as e:
         audit.log(
             AuditEvent(
                 event_type=AuditEventType.PROXY_SETUP,
@@ -108,7 +109,12 @@ def setup_proxy(
                 parameters={"error": str(e)},
             )
         )
-        console.error(str(e))
+        console.error(e.message)
+        if e.details:
+            for detail in e.details:
+                console.print(f"  [dim]{detail}[/dim]")
+        if e.hint:
+            console.hint(e.hint)
         raise typer.Exit(e.exit_code) from e
 
 

@@ -35,7 +35,12 @@ class SMError(Exception):
         self.details = details or []
 
     def __str__(self) -> str:
-        return self.message
+        parts = [self.message]
+        if self.details:
+            parts.extend(f"  {detail}" for detail in self.details)
+        if self.hint:
+            parts.append(f"Hint: {self.hint}")
+        return "\n".join(parts)
 
 
 class ConfigurationError(SMError):
