@@ -265,77 +265,168 @@ class PostgreSQLService:
 
         self.ctx.console.success(f"Database '{name}' dropped")
 
-    def _get_object_counts(self, database: str) -> dict[str, int]:
-        """Get counts of objects in a database for reporting.
+    def _get_object_details(self, database: str) -> dict[str, list[str]]:
+        """Get names of all objects in a database for reporting.
 
         Args:
             database: Database name
 
         Returns:
-            Dictionary with counts by object type
+            Dictionary with lists of object names by type
         """
         if self.ctx.dry_run:
             return {}
 
-        # Query all object counts in a single SQL statement
+        details: dict[str, list[str]] = {}
+
+        # Tables
         result = self._run_sql(
             """
-            SELECT
-                (SELECT count(*) FROM pg_tables
-                 WHERE schemaname NOT LIKE 'pg_%'
-                 AND schemaname != 'information_schema') as tables,
-                (SELECT count(*) FROM pg_views
-                 WHERE schemaname NOT LIKE 'pg_%'
-                 AND schemaname != 'information_schema') as views,
-                (SELECT count(*) FROM pg_matviews
-                 WHERE schemaname NOT LIKE 'pg_%'
-                 AND schemaname != 'information_schema') as matviews,
-                (SELECT count(*) FROM pg_indexes
-                 WHERE schemaname NOT LIKE 'pg_%'
-                 AND schemaname != 'information_schema') as indexes,
-                (SELECT count(*) FROM pg_sequences
-                 WHERE schemaname NOT LIKE 'pg_%'
-                 AND schemaname != 'information_schema') as sequences,
-                (SELECT count(*) FROM pg_proc p
-                 JOIN pg_namespace n ON p.pronamespace = n.oid
-                 WHERE n.nspname NOT LIKE 'pg_%'
-                 AND n.nspname != 'information_schema') as functions,
-                (SELECT count(*) FROM pg_trigger t
-                 JOIN pg_class c ON t.tgrelid = c.oid
-                 JOIN pg_namespace n ON c.relnamespace = n.oid
-                 WHERE n.nspname NOT LIKE 'pg_%'
-                 AND n.nspname != 'information_schema'
-                 AND NOT t.tgisinternal) as triggers,
-                (SELECT count(*) FROM pg_type t
-                 JOIN pg_namespace n ON t.typnamespace = n.oid
-                 WHERE n.nspname NOT LIKE 'pg_%'
-                 AND n.nspname != 'information_schema'
-                 AND t.typtype IN ('c', 'e', 'd')) as types,
-                (SELECT count(*) FROM pg_extension
-                 WHERE extname != 'plpgsql') as extensions
+            SELECT schemaname || '.' || tablename
+            FROM pg_tables
+            WHERE schemaname NOT LIKE 'pg_%'
+            AND schemaname != 'information_schema'
+            ORDER BY schemaname, tablename
             """,
             database=database,
-            description="Count database objects",
             check=False,
         )
+        if result.strip():
+            details["tables"] = [t.strip() for t in result.strip().splitlines()]
 
-        # Parse pipe-separated results
-        parts = result.strip().split("|")
-        if len(parts) >= 9:
-            return {
-                "tables": int(parts[0].strip() or 0),
-                "views": int(parts[1].strip() or 0),
-                "materialized_views": int(parts[2].strip() or 0),
-                "indexes": int(parts[3].strip() or 0),
-                "sequences": int(parts[4].strip() or 0),
-                "functions": int(parts[5].strip() or 0),
-                "triggers": int(parts[6].strip() or 0),
-                "types": int(parts[7].strip() or 0),
-                "extensions": int(parts[8].strip() or 0),
-            }
-        return {}
+        # Views
+        result = self._run_sql(
+            """
+            SELECT schemaname || '.' || viewname
+            FROM pg_views
+            WHERE schemaname NOT LIKE 'pg_%'
+            AND schemaname != 'information_schema'
+            ORDER BY schemaname, viewname
+            """,
+            database=database,
+            check=False,
+        )
+        if result.strip():
+            details["views"] = [v.strip() for v in result.strip().splitlines()]
 
-    def reset_database(self, name: str, *, force: bool = False) -> dict[str, int]:
+        # Materialized views
+        result = self._run_sql(
+            """
+            SELECT schemaname || '.' || matviewname
+            FROM pg_matviews
+            WHERE schemaname NOT LIKE 'pg_%'
+            AND schemaname != 'information_schema'
+            ORDER BY schemaname, matviewname
+            """,
+            database=database,
+            check=False,
+        )
+        if result.strip():
+            details["materialized_views"] = [m.strip() for m in result.strip().splitlines()]
+
+        # Sequences
+        result = self._run_sql(
+            """
+            SELECT schemaname || '.' || sequencename
+            FROM pg_sequences
+            WHERE schemaname NOT LIKE 'pg_%'
+            AND schemaname != 'information_schema'
+            ORDER BY schemaname, sequencename
+            """,
+            database=database,
+            check=False,
+        )
+        if result.strip():
+            details["sequences"] = [s.strip() for s in result.strip().splitlines()]
+
+        # Functions
+        result = self._run_sql(
+            """
+            SELECT n.nspname || '.' || p.proname
+            FROM pg_proc p
+            JOIN pg_namespace n ON p.pronamespace = n.oid
+            WHERE n.nspname NOT LIKE 'pg_%'
+            AND n.nspname != 'information_schema'
+            ORDER BY n.nspname, p.proname
+            """,
+            database=database,
+            check=False,
+        )
+        if result.strip():
+            details["functions"] = [f.strip() for f in result.strip().splitlines()]
+
+        # Triggers
+        result = self._run_sql(
+            """
+            SELECT n.nspname || '.' || t.tgname || ' (on ' || c.relname || ')'
+            FROM pg_trigger t
+            JOIN pg_class c ON t.tgrelid = c.oid
+            JOIN pg_namespace n ON c.relnamespace = n.oid
+            WHERE n.nspname NOT LIKE 'pg_%'
+            AND n.nspname != 'information_schema'
+            AND NOT t.tgisinternal
+            ORDER BY n.nspname, t.tgname
+            """,
+            database=database,
+            check=False,
+        )
+        if result.strip():
+            details["triggers"] = [t.strip() for t in result.strip().splitlines()]
+
+        # Custom types (composite, enum, domain)
+        result = self._run_sql(
+            """
+            SELECT n.nspname || '.' || t.typname ||
+                   CASE t.typtype
+                       WHEN 'e' THEN ' (enum)'
+                       WHEN 'c' THEN ' (composite)'
+                       WHEN 'd' THEN ' (domain)'
+                   END
+            FROM pg_type t
+            JOIN pg_namespace n ON t.typnamespace = n.oid
+            WHERE n.nspname NOT LIKE 'pg_%'
+            AND n.nspname != 'information_schema'
+            AND t.typtype IN ('c', 'e', 'd')
+            ORDER BY n.nspname, t.typname
+            """,
+            database=database,
+            check=False,
+        )
+        if result.strip():
+            details["types"] = [t.strip() for t in result.strip().splitlines()]
+
+        # Extensions
+        result = self._run_sql(
+            """
+            SELECT extname || ' v' || extversion
+            FROM pg_extension
+            WHERE extname != 'plpgsql'
+            ORDER BY extname
+            """,
+            database=database,
+            check=False,
+        )
+        if result.strip():
+            details["extensions"] = [e.strip() for e in result.strip().splitlines()]
+
+        # Indexes (separate query, not part of tables)
+        result = self._run_sql(
+            """
+            SELECT schemaname || '.' || indexname || ' (on ' || tablename || ')'
+            FROM pg_indexes
+            WHERE schemaname NOT LIKE 'pg_%'
+            AND schemaname != 'information_schema'
+            ORDER BY schemaname, indexname
+            """,
+            database=database,
+            check=False,
+        )
+        if result.strip():
+            details["indexes"] = [i.strip() for i in result.strip().splitlines()]
+
+        return details
+
+    def reset_database(self, name: str, *, force: bool = False) -> dict[str, list[str]]:
         """Reset a PostgreSQL database by dropping all objects.
 
         This drops ALL objects in the database including:
@@ -359,7 +450,7 @@ class PostgreSQLService:
             force: Terminate existing connections first
 
         Returns:
-            Dictionary with counts of dropped objects by type
+            Dictionary with lists of dropped object names by type
 
         Raises:
             PostgresError: If reset fails
@@ -372,8 +463,8 @@ class PostgreSQLService:
                 hint="Check database name with: sm postgres db list",
             )
 
-        # Get object counts before reset
-        counts = self._get_object_counts(name)
+        # Get object details before reset
+        details = self._get_object_details(name)
 
         # Safety verification: confirm we're about to operate on the correct database
         # This is defense in depth - verify the database name matches what we expect
@@ -456,7 +547,7 @@ class PostgreSQLService:
 
         self.ctx.console.success(f"Database '{name}' reset successfully")
 
-        return counts
+        return details
 
     def list_databases(self) -> list[DatabaseInfo]:
         """List all databases.

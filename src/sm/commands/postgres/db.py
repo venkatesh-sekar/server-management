@@ -789,10 +789,6 @@ def reset_database(
         ..., "--database", "-d",
         help="Database name to reset",
     ),
-    confirm_name: Optional[str] = typer.Option(
-        None, "--confirm-name",
-        help="Confirm database name (required for safety)",
-    ),
     # Global options
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without executing"),
     force: bool = typer.Option(False, "--force", help="Allow dangerous operations"),
@@ -805,19 +801,14 @@ def reset_database(
     triggers, sequences, types, indexes, and extensions. The database name
     and user permissions are preserved.
 
-    Requires THREE safety confirmations:
-
-    1. --force flag
-
-    2. --confirm-name=<database> parameter
-
-    3. Interactive prompt to TYPE the exact database name
+    Requires interactive confirmation where you must TYPE the database name.
+    This cannot be automated - it requires manual human input.
 
     No backup is created - ensure you have your own backup before proceeding.
 
     Example:
 
-        sm postgres db reset -d testdb --force --confirm-name=testdb
+        sm postgres db reset -d testdb --force
 
         # Preview what would be dropped
 
@@ -828,7 +819,6 @@ def reset_database(
         force=force,
         yes=yes,
         verbose=verbose,
-        confirm_name=confirm_name,
     )
     audit = get_audit_logger()
 
@@ -838,12 +828,6 @@ def reset_database(
     except ValidationError as e:
         console.error(str(e))
         raise typer.Exit(3)
-
-    # Safety check: --confirm-name must match
-    if confirm_name != name:
-        console.error(f"--confirm-name must match database name '{name}'")
-        console.error(f"Use: --confirm-name={name}")
-        raise typer.Exit(4)
 
     # Safety check: protected database
     try:
@@ -864,9 +848,9 @@ def reset_database(
         console.error(f"Database '{name}' does not exist")
         raise typer.Exit(1)
 
-    # Get object counts for display
-    counts = pg._get_object_counts(name) if not dry_run else {}
-    total_objects = sum(counts.values()) if counts else 0
+    # Get object details for display
+    details = pg._get_object_details(name) if not dry_run else {}
+    total_objects = sum(len(v) for v in details.values()) if details else 0
 
     # Display warning and summary
     console.print()
@@ -877,34 +861,41 @@ def reset_database(
     console.print(f"  Database: [bold]{name}[/bold]")
     console.print()
 
-    if counts:
-        console.print("  [bold]Objects to be PERMANENTLY DELETED:[/bold]")
-        if counts.get("tables", 0):
-            console.print(f"    Tables:              {counts['tables']}")
-        if counts.get("views", 0):
-            console.print(f"    Views:               {counts['views']}")
-        if counts.get("materialized_views", 0):
-            console.print(f"    Materialized Views:  {counts['materialized_views']}")
-        if counts.get("indexes", 0):
-            console.print(f"    Indexes:             {counts['indexes']}")
-        if counts.get("sequences", 0):
-            console.print(f"    Sequences:           {counts['sequences']}")
-        if counts.get("functions", 0):
-            console.print(f"    Functions:           {counts['functions']}")
-        if counts.get("triggers", 0):
-            console.print(f"    Triggers:            {counts['triggers']}")
-        if counts.get("types", 0):
-            console.print(f"    Custom Types:        {counts['types']}")
-        if counts.get("extensions", 0):
-            console.print(f"    Extensions:          {counts['extensions']}")
+    # Helper to display objects with names
+    def _display_objects(label: str, items: list[str]) -> None:
+        console.print(f"  [bold]{label}[/bold] ({len(items)}):")
+        for item in items:
+            console.print(f"    [red]-[/red] {item}")
         console.print()
-        console.print(f"  [bold red]TOTAL: {total_objects} objects will be deleted[/bold red]")
+
+    if details:
+        console.print("[bold]Objects to be PERMANENTLY DELETED:[/bold]")
+        console.print()
+        if details.get("tables"):
+            _display_objects("Tables", details["tables"])
+        if details.get("views"):
+            _display_objects("Views", details["views"])
+        if details.get("materialized_views"):
+            _display_objects("Materialized Views", details["materialized_views"])
+        if details.get("indexes"):
+            _display_objects("Indexes", details["indexes"])
+        if details.get("sequences"):
+            _display_objects("Sequences", details["sequences"])
+        if details.get("functions"):
+            _display_objects("Functions", details["functions"])
+        if details.get("triggers"):
+            _display_objects("Triggers", details["triggers"])
+        if details.get("types"):
+            _display_objects("Custom Types", details["types"])
+        if details.get("extensions"):
+            _display_objects("Extensions", details["extensions"])
+        console.print(f"[bold red]TOTAL: {total_objects} objects will be deleted[/bold red]")
     elif not dry_run:
         console.print("  [dim]No objects found in database (may already be empty)[/dim]")
 
     console.print()
-    console.print("[bold yellow]  WARNING: No backup will be created![/bold yellow]")
-    console.print("[yellow]  Ensure you have your own backup before proceeding.[/yellow]")
+    console.print("[bold yellow]WARNING: No backup will be created![/bold yellow]")
+    console.print("[yellow]Ensure you have your own backup before proceeding.[/yellow]")
     console.print()
     console.print("[bold red]" + "=" * 60 + "[/bold red]")
     console.print()
