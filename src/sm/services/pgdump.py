@@ -263,7 +263,6 @@ class PgDumpService:
                 cmd,
                 description=f"Dump database {database}",
                 check=True,
-                as_user="postgres",
             )
 
             # Calculate checksum
@@ -326,7 +325,6 @@ class PgDumpService:
                 cmd,
                 description="Dump globals",
                 check=True,
-                as_user="postgres",
             )
             return output_path
 
@@ -434,7 +432,6 @@ class PgDumpService:
                 ],
                 description=f"Create database {target_database}",
                 check=True,
-                as_user="postgres",
             )
 
         # Build pg_restore command
@@ -471,7 +468,6 @@ class PgDumpService:
                 cmd,
                 description=f"Restore to {target_database}",
                 check=False,
-                as_user="postgres",
             )
 
             # Check for actual errors (not just warnings)
@@ -499,7 +495,6 @@ class PgDumpService:
                     ],
                     description=f"Set owner for {target_database}",
                     check=True,
-                    as_user="postgres",
                 )
 
             console.success(f"Restored database '{target_database}'")
@@ -538,7 +533,6 @@ class PgDumpService:
                 ],
                 description="Restore globals",
                 check=True,
-                as_user="postgres",
             )
             console.success("Restored global objects")
 
@@ -630,7 +624,6 @@ class PgDumpService:
                 ],
                 description=f"Terminate connections to {database}",
                 check=False,
-                as_user="postgres",
             )
 
         console.step(f"Dropping database '{database}'...")
@@ -644,7 +637,6 @@ class PgDumpService:
                 ],
                 description=f"Drop database {database}",
                 check=True,
-                as_user="postgres",
             )
 
         except Exception as e:
