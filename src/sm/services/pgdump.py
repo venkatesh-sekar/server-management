@@ -44,7 +44,7 @@ class PgDumpService:
 
     Features:
     - Uses custom format (-Fc) for portability and compression
-    - Parallel dump/restore with --jobs
+    - Parallel restore with --jobs (pg_restore only)
     - Progress reporting via verbose mode
     - Checksum calculation for verification
     - Proper error handling with fail-fast behavior
@@ -243,9 +243,8 @@ class PgDumpService:
             "-f", str(output_path),
         ]
 
-        # Add parallel jobs if > 1
-        if jobs > 1:
-            cmd.extend(["-j", str(jobs)])
+        # Note: pg_dump -j only works with directory format (-Fd), not custom format (-Fc)
+        # Parallel restore is supported via pg_restore -j
 
         # Add table exclusions
         if exclude_tables:
