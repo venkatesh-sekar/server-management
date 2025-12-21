@@ -141,7 +141,7 @@ class S3Service:
             BackupError: If connection fails
         """
         if self.ctx.dry_run:
-            console.dry_run("Would test S3 connectivity")
+            console.dry_run_msg("Would test S3 connectivity")
             return True
 
         try:
@@ -178,7 +178,7 @@ class S3Service:
         file_size = local_path.stat().st_size
 
         if self.ctx.dry_run:
-            console.dry_run(f"Would upload {local_path} to s3://{self.config.bucket}/{remote_key}")
+            console.dry_run_msg(f"Would upload {local_path} to s3://{self.config.bucket}/{remote_key}")
             return
 
         try:
@@ -227,7 +227,7 @@ class S3Service:
             BackupError: If download fails
         """
         if self.ctx.dry_run:
-            console.dry_run(
+            console.dry_run_msg(
                 f"Would download s3://{self.config.bucket}/{remote_key} to {local_path}"
             )
             return
@@ -290,7 +290,7 @@ class S3Service:
             S3ObjectInfo for each matching object
         """
         if self.ctx.dry_run:
-            console.dry_run(f"Would list objects under s3://{self.config.bucket}/{prefix}")
+            console.dry_run_msg(f"Would list objects under s3://{self.config.bucket}/{prefix}")
             return
 
         try:
@@ -330,7 +330,7 @@ class S3Service:
             Common prefix strings
         """
         if self.ctx.dry_run:
-            console.dry_run(f"Would list prefixes under s3://{self.config.bucket}/{prefix}")
+            console.dry_run_msg(f"Would list prefixes under s3://{self.config.bucket}/{prefix}")
             return
 
         try:
@@ -360,7 +360,7 @@ class S3Service:
             BackupError: If deletion fails
         """
         if self.ctx.dry_run:
-            console.dry_run(f"Would delete s3://{self.config.bucket}/{key}")
+            console.dry_run_msg(f"Would delete s3://{self.config.bucket}/{key}")
             return
 
         try:
@@ -389,7 +389,7 @@ class S3Service:
         """
         if self.ctx.dry_run:
             objects = list(self.list_objects(prefix))
-            console.dry_run(f"Would delete {len(objects)} objects under {prefix}")
+            console.dry_run_msg(f"Would delete {len(objects)} objects under {prefix}")
             return len(objects)
 
         deleted_count = 0
@@ -434,7 +434,7 @@ class S3Service:
             True if object exists
         """
         if self.ctx.dry_run:
-            console.dry_run(f"Would check if s3://{self.config.bucket}/{key} exists")
+            console.dry_run_msg(f"Would check if s3://{self.config.bucket}/{key} exists")
             return True
 
         try:
@@ -456,7 +456,7 @@ class S3Service:
             BackupError: If object not found
         """
         if self.ctx.dry_run:
-            console.dry_run(f"Would get size of s3://{self.config.bucket}/{key}")
+            console.dry_run_msg(f"Would get size of s3://{self.config.bucket}/{key}")
             return 0
 
         try:
@@ -483,7 +483,7 @@ class S3Service:
             BackupError: If download or parse fails
         """
         if self.ctx.dry_run:
-            console.dry_run(f"Would download JSON from s3://{self.config.bucket}/{key}")
+            console.dry_run_msg(f"Would download JSON from s3://{self.config.bucket}/{key}")
             return {}
 
         try:
@@ -512,7 +512,7 @@ class S3Service:
             BackupError: If upload fails
         """
         if self.ctx.dry_run:
-            console.dry_run(f"Would upload JSON to s3://{self.config.bucket}/{key}")
+            console.dry_run_msg(f"Would upload JSON to s3://{self.config.bucket}/{key}")
             return
 
         try:

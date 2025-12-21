@@ -173,7 +173,7 @@ class MongoDumpService:
             List of DatabaseSize objects
         """
         if self.ctx.dry_run:
-            console.dry_run("Would list databases")
+            console.dry_run_msg("Would list databases")
             return []
 
         # Build mongosh command
@@ -236,7 +236,7 @@ class MongoDumpService:
             BackupError: If dump fails
         """
         if self.ctx.dry_run:
-            console.dry_run(f"Would dump database '{database}' to {output_dir}")
+            console.dry_run_msg(f"Would dump database '{database}' to {output_dir}")
             return DumpInfo(
                 database=database,
                 dump_path=output_dir / f"{database}.tar.gz",
@@ -329,7 +329,7 @@ class MongoDumpService:
             raise BackupError(f"Dump file not found: {dump_path}")
 
         if self.ctx.dry_run:
-            console.dry_run(f"Would restore {dump_path} to database '{target_database}'")
+            console.dry_run_msg(f"Would restore {dump_path} to database '{target_database}'")
             return
 
         # Extract if archive

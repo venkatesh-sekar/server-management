@@ -125,7 +125,7 @@ class PgDumpService:
             List of DatabaseSize objects
         """
         if self.ctx.dry_run:
-            console.dry_run("Would list databases")
+            console.dry_run_msg("Would list databases")
             return []
 
         # Query to get database names and sizes
@@ -217,7 +217,7 @@ class PgDumpService:
             BackupError: If dump fails
         """
         if self.ctx.dry_run:
-            console.dry_run(f"Would dump database '{database}' to {output_path}")
+            console.dry_run_msg(f"Would dump database '{database}' to {output_path}")
             return DumpInfo(
                 database=database,
                 file_path=output_path,
@@ -302,7 +302,7 @@ class PgDumpService:
             BackupError: If dump fails
         """
         if self.ctx.dry_run:
-            console.dry_run(f"Would dump globals to {output_path}")
+            console.dry_run_msg(f"Would dump globals to {output_path}")
             return output_path
 
         # Ensure output directory exists
@@ -417,7 +417,7 @@ class PgDumpService:
             raise BackupError(f"Dump file not found: {dump_path}")
 
         if self.ctx.dry_run:
-            console.dry_run(f"Would restore {dump_path} to database '{target_database}'")
+            console.dry_run_msg(f"Would restore {dump_path} to database '{target_database}'")
             return
 
         # Create database if needed
@@ -519,7 +519,7 @@ class PgDumpService:
             raise BackupError(f"Globals file not found: {sql_path}")
 
         if self.ctx.dry_run:
-            console.dry_run(f"Would restore globals from {sql_path}")
+            console.dry_run_msg(f"Would restore globals from {sql_path}")
             return
 
         console.step("Restoring global objects...")
@@ -605,7 +605,7 @@ class PgDumpService:
             BackupError: If drop fails
         """
         if self.ctx.dry_run:
-            console.dry_run(f"Would drop database '{database}'")
+            console.dry_run_msg(f"Would drop database '{database}'")
             return
 
         if force:

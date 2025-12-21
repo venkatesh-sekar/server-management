@@ -558,7 +558,7 @@ def _migrate_direct(
     from sm.services.pgdump import format_bytes
 
     if ctx.dry_run:
-        console.dry_run("Would run: pg_dump | ssh | pg_restore pipeline")
+        console.dry_run_msg("Would run: pg_dump | ssh | pg_restore pipeline")
         return
 
     # Create safety backup before overwrite

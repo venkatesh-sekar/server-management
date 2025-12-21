@@ -68,7 +68,7 @@ def run_setup(
             run_preflight_checks(dry_run=ctx.dry_run)
             ctx.console.success("Preflight checks passed")
         else:
-            ctx.console.dry_run("Would run preflight checks (root, OS, disk space)")
+            ctx.console.dry_run_msg("Would run preflight checks (root, OS, disk space)")
 
         # Validate observability requirements
         if observability and not otlp_endpoint:
@@ -82,7 +82,7 @@ def run_setup(
         if hostname:
             ctx.console.step(f"Setting hostname to {hostname}")
             if ctx.dry_run:
-                ctx.console.dry_run(f"Would run: hostnamectl set-hostname {hostname}")
+                ctx.console.dry_run_msg(f"Would run: hostnamectl set-hostname {hostname}")
             else:
                 result = subprocess.run(
                     ["hostnamectl", "set-hostname", hostname],
@@ -99,7 +99,7 @@ def run_setup(
             ctx.console.step("Installing Docker")
             docker_mtu = mtu if mtu is not None else 1450
             if ctx.dry_run:
-                ctx.console.dry_run(f"Would run: sm docker install --mtu={docker_mtu}")
+                ctx.console.dry_run_msg(f"Would run: sm docker install --mtu={docker_mtu}")
             else:
                 from sm.commands.docker.install import run_install
                 run_install(ctx, mtu=docker_mtu, skip_mtu_fix=False)
@@ -118,7 +118,7 @@ def run_setup(
         if security:
             ctx.console.step("Applying security hardening")
             if ctx.dry_run:
-                ctx.console.dry_run("Would run: sm security harden")
+                ctx.console.dry_run_msg("Would run: sm security harden")
             else:
                 from sm.commands.security.harden import run_harden
                 run_harden(ctx)
@@ -127,7 +127,7 @@ def run_setup(
         if observability:
             ctx.console.step("Setting up observability")
             if ctx.dry_run:
-                ctx.console.dry_run(f"Would run: sm observability setup --otlp-endpoint={otlp_endpoint}")
+                ctx.console.dry_run_msg(f"Would run: sm observability setup --otlp-endpoint={otlp_endpoint}")
             else:
                 from sm.commands.observability.setup import run_observability_setup
                 run_observability_setup(
@@ -155,7 +155,7 @@ def run_setup(
         if postgres:
             ctx.console.step("Setting up PostgreSQL")
             if ctx.dry_run:
-                ctx.console.dry_run("Would run: sm postgres setup --skip-backup")
+                ctx.console.dry_run_msg("Would run: sm postgres setup --skip-backup")
             else:
                 from sm.commands.postgres.setup import run_setup as run_postgres_setup
                 run_postgres_setup(
@@ -185,7 +185,7 @@ def run_setup(
         if mongodb:
             ctx.console.step("Setting up MongoDB 7.0")
             if ctx.dry_run:
-                ctx.console.dry_run("Would run: sm mongodb setup")
+                ctx.console.dry_run_msg("Would run: sm mongodb setup")
             else:
                 from sm.commands.mongodb.setup import run_setup as run_mongodb_setup
                 run_mongodb_setup(ctx)

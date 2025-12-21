@@ -169,7 +169,7 @@ class PgBackRestService:
             BackupError: If listing fails
         """
         if self.ctx.dry_run:
-            console.dry_run("Would list pgBackRest backups")
+            console.dry_run_msg("Would list pgBackRest backups")
             return []
 
         if not self.is_configured():
@@ -311,7 +311,7 @@ class PgBackRestService:
             BackupError: If verification fails
         """
         if self.ctx.dry_run:
-            console.dry_run("Would verify backup")
+            console.dry_run_msg("Would verify backup")
             return True
 
         cmd = ["pgbackrest", "--stanza", self.stanza, "verify"]
@@ -350,7 +350,7 @@ class PgBackRestService:
             raise BackupError(f"Invalid backup type: {backup_type}")
 
         if self.ctx.dry_run:
-            console.dry_run(f"Would trigger {backup_type} backup")
+            console.dry_run_msg(f"Would trigger {backup_type} backup")
             return
 
         console.step(f"Starting {backup_type} backup...")
@@ -399,12 +399,12 @@ class PgBackRestService:
             BackupError: If restore fails
         """
         if self.ctx.dry_run:
-            console.dry_run("Would perform pgBackRest restore")
+            console.dry_run_msg("Would perform pgBackRest restore")
             if recovery_target:
                 if recovery_target.timestamp:
-                    console.dry_run(f"  Recovery target: {recovery_target.timestamp}")
+                    console.dry_run_msg(f"  Recovery target: {recovery_target.timestamp}")
                 elif recovery_target.lsn:
-                    console.dry_run(f"  Recovery target LSN: {recovery_target.lsn}")
+                    console.dry_run_msg(f"  Recovery target LSN: {recovery_target.lsn}")
             return
 
         # Validate recovery target if provided

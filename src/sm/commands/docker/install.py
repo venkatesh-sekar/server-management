@@ -39,7 +39,7 @@ def run_install(ctx: ExecutionContext, mtu: int = 1450, skip_mtu_fix: bool = Fal
         ctx.console.step("Installing Docker via get.docker.com")
 
         if ctx.dry_run:
-            ctx.console.dry_run("Would run: curl -fsSL https://get.docker.com | sh")
+            ctx.console.dry_run_msg("Would run: curl -fsSL https://get.docker.com | sh")
         else:
             result = subprocess.run(
                 ["bash", "-c", "curl -fsSL https://get.docker.com | sh"],
@@ -64,8 +64,8 @@ def run_install(ctx: ExecutionContext, mtu: int = 1450, skip_mtu_fix: bool = Fal
         ctx.console.step("Enabling Docker service")
 
         if ctx.dry_run:
-            ctx.console.dry_run("Would run: systemctl enable docker")
-            ctx.console.dry_run("Would run: systemctl start docker")
+            ctx.console.dry_run_msg("Would run: systemctl enable docker")
+            ctx.console.dry_run_msg("Would run: systemctl start docker")
         else:
             # Enable
             result = subprocess.run(
@@ -94,7 +94,7 @@ def run_install(ctx: ExecutionContext, mtu: int = 1450, skip_mtu_fix: bool = Fal
         ctx.console.step("Verifying Docker installation")
 
         if ctx.dry_run:
-            ctx.console.dry_run("Would run: docker --version")
+            ctx.console.dry_run_msg("Would run: docker --version")
         else:
             result = subprocess.run(
                 ["docker", "--version"],
