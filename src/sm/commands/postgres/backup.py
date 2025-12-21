@@ -77,6 +77,46 @@ def _get_timestamp() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
+def _confirm_pg_credentials(
+    app_config: AppConfig,
+    skip_confirm: bool = False,
+) -> tuple[str, int, str]:
+    """Confirm PostgreSQL connection credentials with auto-filled defaults.
+
+    Args:
+        app_config: Application configuration
+        skip_confirm: If True, return defaults without prompting
+
+    Returns:
+        Tuple of (host, port, pg_user)
+    """
+    # Auto-fill from config (which reads env vars)
+    default_host = app_config.postgres.host
+    default_port = app_config.postgres.port
+    default_user = app_config.postgres.pg_user
+
+    if skip_confirm:
+        return default_host, default_port, default_user
+
+    console.print("-> Confirm database connection:")
+
+    # Interactive prompts with defaults
+    host_input = console.input(f"  Host [[cyan]{default_host}[/cyan]]: ").strip()
+    host = host_input if host_input else default_host
+
+    port_input = console.input(f"  Port [[cyan]{default_port}[/cyan]]: ").strip()
+    try:
+        port = int(port_input) if port_input else default_port
+    except ValueError:
+        console.warn(f"Invalid port '{port_input}', using default {default_port}")
+        port = default_port
+
+    user_input = console.input(f"  Username [[cyan]{default_user}[/cyan]]: ").strip()
+    user = user_input if user_input else default_user
+
+    return host, port, user
+
+
 @app.command("export")
 @require_root
 def export_database(
@@ -142,12 +182,16 @@ def export_database(
     # Run preflight checks
     run_preflight_checks(dry_run=ctx.dry_run, verbose=ctx.is_verbose)
 
+    # Confirm database credentials (auto-filled, user can override)
+    pg_host, pg_port, pg_user = _confirm_pg_credentials(app_config, skip_confirm=yes)
+
     # Get services
     executor = CommandExecutor(ctx)
     pgdump = PgDumpService(
         ctx, executor,
-        pg_host=app_config.postgres.host,
-        pg_port=app_config.postgres.port,
+        pg_host=pg_host,
+        pg_port=pg_port,
+        pg_user=pg_user,
     )
 
     # Check pg_dump is available
