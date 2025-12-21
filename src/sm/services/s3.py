@@ -106,14 +106,16 @@ class S3Service:
     def client(self):
         """Lazy-initialize S3 client."""
         if self._client is None:
-            try:
-                import boto3
-                from botocore.config import Config as BotoConfig
-            except ImportError as e:
-                raise BackupError(
-                    "boto3 is required for S3 operations",
-                    hint="Install with: pip install boto3",
-                ) from e
+            from sm.core.deps import ensure_package
+
+            ensure_package(
+                pip_name="boto3",
+                apt_name="python3-boto3",
+                apk_name="py3-boto3",
+            )
+
+            import boto3
+            from botocore.config import Config as BotoConfig
 
             self._client = boto3.client(
                 "s3",
