@@ -32,6 +32,7 @@ class PostgresConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 5432
     pg_user: str = Field(default_factory=lambda: os.environ.get("POSTGRES_USER", "postgres"))
+    pg_admin_db: str = Field(default_factory=lambda: os.environ.get("POSTGRES_DB", "postgres"))
     data_dir: Optional[Path] = None
 
     @field_validator("version")

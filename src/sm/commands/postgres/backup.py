@@ -80,7 +80,7 @@ def _get_timestamp() -> str:
 def _confirm_pg_credentials(
     app_config: AppConfig,
     skip_confirm: bool = False,
-) -> tuple[str, int, str]:
+) -> tuple[str, int, str, str]:
     """Confirm PostgreSQL connection credentials with auto-filled defaults.
 
     Args:
@@ -88,15 +88,16 @@ def _confirm_pg_credentials(
         skip_confirm: If True, return defaults without prompting
 
     Returns:
-        Tuple of (host, port, pg_user)
+        Tuple of (host, port, pg_user, pg_admin_db)
     """
     # Auto-fill from config (which reads env vars)
     default_host = app_config.postgres.host
     default_port = app_config.postgres.port
     default_user = app_config.postgres.pg_user
+    default_admin_db = app_config.postgres.pg_admin_db
 
     if skip_confirm:
-        return default_host, default_port, default_user
+        return default_host, default_port, default_user, default_admin_db
 
     console.print("-> Confirm database connection:")
 
@@ -114,7 +115,10 @@ def _confirm_pg_credentials(
     user_input = console.input(f"  Username [[cyan]{default_user}[/cyan]]: ").strip()
     user = user_input if user_input else default_user
 
-    return host, port, user
+    db_input = console.input(f"  Admin DB [[cyan]{default_admin_db}[/cyan]]: ").strip()
+    admin_db = db_input if db_input else default_admin_db
+
+    return host, port, user, admin_db
 
 
 @app.command("export")
@@ -183,7 +187,9 @@ def export_database(
     run_preflight_checks(dry_run=ctx.dry_run, verbose=ctx.is_verbose)
 
     # Confirm database credentials (auto-filled, user can override)
-    pg_host, pg_port, pg_user = _confirm_pg_credentials(app_config, skip_confirm=yes)
+    pg_host, pg_port, pg_user, pg_admin_db = _confirm_pg_credentials(
+        app_config, skip_confirm=yes
+    )
 
     # Get services
     executor = CommandExecutor(ctx)
@@ -192,6 +198,7 @@ def export_database(
         pg_host=pg_host,
         pg_port=pg_port,
         pg_user=pg_user,
+        pg_admin_db=pg_admin_db,
     )
 
     # Check pg_dump is available

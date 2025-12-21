@@ -61,6 +61,7 @@ class PgDumpService:
         pg_host: str = "127.0.0.1",
         pg_port: int = 5432,
         pg_user: str = "postgres",
+        pg_admin_db: str = "postgres",
     ) -> None:
         """Initialize pg_dump service.
 
@@ -70,12 +71,14 @@ class PgDumpService:
             pg_host: PostgreSQL host
             pg_port: PostgreSQL port
             pg_user: PostgreSQL user for connections
+            pg_admin_db: Database to connect to for admin operations
         """
         self.ctx = ctx
         self.executor = executor
         self.pg_host = pg_host
         self.pg_port = pg_port
         self.pg_user = pg_user
+        self.pg_admin_db = pg_admin_db
 
     def check_commands_available(self) -> tuple[bool, list[str]]:
         """Check if pg_dump and pg_restore are available.
@@ -102,7 +105,8 @@ class PgDumpService:
 
         cmd = [
             "psql", "-h", self.pg_host, "-p", str(self.pg_port),
-            "-U", self.pg_user, "-t", "-c", "SHOW server_version;",
+            "-U", self.pg_user, "-d", self.pg_admin_db,
+            "-t", "-c", "SHOW server_version;",
         ]
         result = self.executor.run(
             cmd,
@@ -135,7 +139,8 @@ class PgDumpService:
 
         cmd = [
             "psql", "-h", self.pg_host, "-p", str(self.pg_port),
-            "-U", self.pg_user, "-t", "-A", "-F", "|", "-c", sql,
+            "-U", self.pg_user, "-d", self.pg_admin_db,
+            "-t", "-A", "-F", "|", "-c", sql,
         ]
         result = self.executor.run(
             cmd,
@@ -178,7 +183,7 @@ class PgDumpService:
         result = self.executor.run(
             [
                 "psql", "-h", self.pg_host, "-p", str(self.pg_port),
-                "-U", self.pg_user, "-t", "-c",
+                "-U", self.pg_user, "-d", self.pg_admin_db, "-t", "-c",
                 # Database name validated by caller via validate_identifier
                 f"SELECT 1 FROM pg_database WHERE datname = '{database}';",  # noqa: S608
             ],
@@ -424,7 +429,7 @@ class PgDumpService:
             self.executor.run(
                 [
                     "psql", "-h", self.pg_host, "-p", str(self.pg_port),
-                    "-U", self.pg_user, "-c",
+                    "-U", self.pg_user, "-d", self.pg_admin_db, "-c",
                     f'CREATE DATABASE "{target_database}";',
                 ],
                 description=f"Create database {target_database}",
@@ -489,7 +494,7 @@ class PgDumpService:
                 self.executor.run(
                     [
                         "psql", "-h", self.pg_host, "-p", str(self.pg_port),
-                        "-U", self.pg_user, "-c",
+                        "-U", self.pg_user, "-d", self.pg_admin_db, "-c",
                         f'ALTER DATABASE "{target_database}" OWNER TO "{owner}";',
                     ],
                     description=f"Set owner for {target_database}",
@@ -529,7 +534,7 @@ class PgDumpService:
             self.executor.run(
                 [
                     "psql", "-h", self.pg_host, "-p", str(self.pg_port),
-                    "-U", self.pg_user, "-f", str(sql_path),
+                    "-U", self.pg_user, "-d", self.pg_admin_db, "-f", str(sql_path),
                 ],
                 description="Restore globals",
                 check=True,
@@ -621,7 +626,7 @@ class PgDumpService:
             self.executor.run(
                 [
                     "psql", "-h", self.pg_host, "-p", str(self.pg_port),
-                    "-U", self.pg_user, "-c", terminate_sql,
+                    "-U", self.pg_user, "-d", self.pg_admin_db, "-c", terminate_sql,
                 ],
                 description=f"Terminate connections to {database}",
                 check=False,
@@ -634,7 +639,7 @@ class PgDumpService:
             self.executor.run(
                 [
                     "psql", "-h", self.pg_host, "-p", str(self.pg_port),
-                    "-U", self.pg_user, "-c",
+                    "-U", self.pg_user, "-d", self.pg_admin_db, "-c",
                     f'DROP DATABASE IF EXISTS "{database}";',
                 ],
                 description=f"Drop database {database}",
