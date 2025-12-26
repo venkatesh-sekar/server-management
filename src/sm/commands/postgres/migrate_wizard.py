@@ -12,6 +12,7 @@ Usage:
 """
 
 import getpass
+import shutil
 import socket
 import tempfile
 import time
@@ -776,6 +777,7 @@ class MigrationWizard:
         # Create temp directory for download
         with tempfile.TemporaryDirectory() as tmpdir:
             dump_path = Path(tmpdir) / f"{session.database}.dump"
+            self._ensure_pg_user_access(Path(tmpdir))
 
             # Download dump with progress
             console.step("Downloading database dump...")
@@ -797,6 +799,7 @@ class MigrationWizard:
                 self.s3.download_file(
                     session.dump_key, dump_path, progress_callback=update_progress
                 )
+            self._ensure_pg_user_access(dump_path)
 
             console.success(f"Downloaded {self._format_size(dump_path.stat().st_size)}")
 
@@ -1031,6 +1034,7 @@ class MigrationWizard:
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
                 dump_path = Path(tmpdir) / f"{session.database}.dump"
+                self._ensure_pg_user_access(Path(tmpdir))
 
                 # Export database
                 console.step(f"Exporting database '{session.database}'...")
@@ -1131,6 +1135,26 @@ class MigrationWizard:
                     counts[table_name] = count
 
         return counts
+
+    def _ensure_pg_user_access(self, path: Path) -> None:
+        """Ensure the PostgreSQL system user can read/write to a path."""
+        if self.pgdump is None:
+            return
+
+        pg_user = self.pgdump.pg_user
+        try:
+            shutil.chown(path, user=pg_user)
+        except (LookupError, PermissionError, FileNotFoundError):
+            return
+
+        try:
+            if path.is_dir():
+                path.chmod(0o700)
+            else:
+                path.chmod(0o600)
+        except PermissionError:
+            # Not critical; continue best-effort
+            pass
 
     # -------------------------------------------------------------------------
     # Utility Methods
