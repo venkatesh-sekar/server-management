@@ -53,6 +53,14 @@ class S3ProviderInfo(TypedDict):
     region: str | None
 
 
+class OwnershipChoice(TypedDict):
+    """Database ownership configuration."""
+
+    mode: str  # "original", "create", "postgres"
+    role_name: str | None  # Role name if mode is "create"
+    role_password: str | None  # Password if mode is "create"
+
+
 # S3 provider presets
 S3_PROVIDERS: dict[str, S3ProviderInfo] = {
     "hetzner-fsn1": {
@@ -122,6 +130,7 @@ class MigrationWizard:
         self.s3: S3Service | None = None
         self.session_service: MigrationSessionService | None = None
         self.pgdump: PgDumpService | None = None
+        self.ownership: OwnershipChoice | None = None
 
     def run(self) -> None:
         """Run the interactive wizard."""
@@ -377,16 +386,21 @@ class MigrationWizard:
         if database is None:
             return
 
-        # Step 4: Create session
+        # Step 4: Get ownership preference
+        self.ownership = self._prompt_ownership()
+        if self.ownership is None:
+            return
+
+        # Step 5: Create session
         console.step("Creating migration session...")
         session = self.session_service.create_session(database)
         console.success(f"Session created: {session.code}")
         console.print()
 
-        # Step 5: Display session code
+        # Step 6: Display session code
         self._display_session_code(session)
 
-        # Step 6: Wait for source
+        # Step 7: Wait for source
         try:
             session = self._wait_for_source(session.code)
         except KeyboardInterrupt:
@@ -396,13 +410,13 @@ class MigrationWizard:
             console.hint(f"Resume with code: {session.code}")
             return
 
-        # Step 7: Download and import
+        # Step 8: Download and import
         self._download_and_import(session)
 
-        # Step 8: Verify
+        # Step 9: Verify
         self._verify_migration(session)
 
-        # Step 9: Cleanup
+        # Step 10: Cleanup
         self._cleanup_session(session)
 
     def _prompt_target_database(self) -> str | None:
@@ -447,6 +461,221 @@ class MigrationWizard:
             console.print()
             console.warn("Migration cancelled")
             return None
+
+    def _prompt_ownership(self) -> OwnershipChoice | None:
+        """Prompt for database ownership configuration.
+
+        Returns:
+            OwnershipChoice or None if cancelled
+        """
+        console.print("[bold]Step 4: Database Ownership[/bold]")
+        console.print()
+        console.print("  [dim]Choose who will own the database and its objects.[/dim]")
+        console.print()
+        console.print("  [1] [bold]postgres[/bold]  (recommended)")
+        console.print("      [dim]All objects owned by postgres user[/dim]")
+        console.print()
+        console.print("  [2] [bold]Create new role[/bold]")
+        console.print("      [dim]Create a role and assign ownership[/dim]")
+        console.print()
+        console.print("  [3] [bold]Keep original owners[/bold]")
+        console.print("      [dim]Roles must already exist on this server[/dim]")
+        console.print()
+        console.print("  [0] Cancel")
+        console.print()
+
+        try:
+            while True:
+                choice = console.input("[bold]Select ownership (1-3): [/bold]")
+                choice = choice.strip()
+
+                if choice == "0":
+                    console.warn("Migration cancelled")
+                    return None
+
+                if choice == "1":
+                    console.print()
+                    console.print("  Selected: [bold]postgres[/bold] will own all objects")
+                    console.print()
+                    return OwnershipChoice(
+                        mode="postgres",
+                        role_name=None,
+                        role_password=None,
+                    )
+
+                if choice == "2":
+                    console.print()
+                    return self._prompt_create_role()
+
+                if choice == "3":
+                    console.print()
+                    console.print("  Selected: [bold]Keep original owners[/bold]")
+                    console.warn("Make sure the required roles exist on this server!")
+                    console.print()
+                    return OwnershipChoice(
+                        mode="original",
+                        role_name=None,
+                        role_password=None,
+                    )
+
+                console.warn("Please enter 1, 2, or 3")
+
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            console.warn("Migration cancelled")
+            return None
+
+    def _prompt_create_role(self) -> OwnershipChoice | None:
+        """Prompt for new role details.
+
+        Returns:
+            OwnershipChoice or None if cancelled
+        """
+        console.print("  [bold]Create New Role[/bold]")
+        console.print()
+
+        try:
+            # Role name
+            while True:
+                role_name = console.input("  Role name: ")
+                role_name = role_name.strip()
+
+                if not role_name:
+                    console.warn("Role name is required")
+                    continue
+
+                if not role_name[0].isalpha() and role_name[0] != "_":
+                    console.warn("Role name must start with a letter or underscore")
+                    continue
+
+                # Check if role exists
+                if self._role_exists(role_name):
+                    console.warn(f"Role '{role_name}' already exists")
+                    use_existing = console.confirm("  Use existing role?", default=True)
+                    if use_existing:
+                        console.print()
+                        console.print(f"  Selected: Use existing role [bold]{role_name}[/bold]")
+                        console.print()
+                        return OwnershipChoice(
+                            mode="create",
+                            role_name=role_name,
+                            role_password=None,  # Don't change password
+                        )
+                    continue
+
+                break
+
+            # Password
+            console.print()
+            console.print("  [dim]Password for the new role (leave empty for no login)[/dim]")
+            raw_password = getpass.getpass("  Password: ")
+            role_password: str | None = raw_password.strip() if raw_password else None
+
+            console.print()
+            console.print(f"  Selected: Create role [bold]{role_name}[/bold]")
+            console.print()
+
+            return OwnershipChoice(
+                mode="create",
+                role_name=role_name,
+                role_password=role_password,
+            )
+
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            console.warn("Migration cancelled")
+            return None
+
+    def _role_exists(self, role_name: str) -> bool:
+        """Check if a PostgreSQL role exists.
+
+        Args:
+            role_name: Role name to check
+
+        Returns:
+            True if role exists
+        """
+        if self.ctx.dry_run:
+            return False
+
+        # Role name is validated to start with letter/underscore in _prompt_create_role
+        result = self.executor.run(
+            [
+                "psql", "-h", "127.0.0.1", "-p", "5432",
+                "-U", "postgres", "-d", "postgres",
+                "-tAc", f"SELECT 1 FROM pg_roles WHERE rolname = '{role_name}';",  # noqa: S608
+            ],
+            description=f"Check role {role_name}",
+            check=False,
+        )
+        return result.stdout.strip() == "1"
+
+    def _create_role(self, role_name: str, password: str | None) -> None:
+        """Create a PostgreSQL role.
+
+        Args:
+            role_name: Role name
+            password: Optional password (enables LOGIN)
+        """
+        if self.ctx.dry_run:
+            console.dry_run_msg(f"Would create role '{role_name}'")
+            return
+
+        if password:
+            # Role with login
+            sql = f"CREATE ROLE \"{role_name}\" LOGIN PASSWORD '{password}';"
+        else:
+            # Role without login
+            sql = f"CREATE ROLE \"{role_name}\";"
+
+        console.step(f"Creating role '{role_name}'...")
+        self.executor.run(
+            [
+                "psql", "-h", "127.0.0.1", "-p", "5432",
+                "-U", "postgres", "-d", "postgres",
+                "-c", sql,
+            ],
+            description=f"Create role {role_name}",
+            check=True,
+        )
+        console.success(f"Role '{role_name}' created")
+
+    def _reassign_ownership(self, database: str, new_owner: str) -> None:
+        """Reassign database and all objects to a new owner.
+
+        Args:
+            database: Database name
+            new_owner: New owner role name
+        """
+        if self.ctx.dry_run:
+            console.dry_run_msg(f"Would reassign ownership to '{new_owner}'")
+            return
+
+        console.step(f"Reassigning ownership to '{new_owner}'...")
+
+        # Change database owner
+        self.executor.run(
+            [
+                "psql", "-h", "127.0.0.1", "-p", "5432",
+                "-U", "postgres", "-d", "postgres",
+                "-c", f'ALTER DATABASE "{database}" OWNER TO "{new_owner}";',
+            ],
+            description=f"Change database owner to {new_owner}",
+            check=True,
+        )
+
+        # Reassign all objects in the database
+        self.executor.run(
+            [
+                "psql", "-h", "127.0.0.1", "-p", "5432",
+                "-U", "postgres", "-d", database,
+                "-c", f'REASSIGN OWNED BY postgres TO "{new_owner}";',
+            ],
+            description=f"Reassign objects to {new_owner}",
+            check=True,
+        )
+
+        console.success(f"Ownership reassigned to '{new_owner}'")
 
     def _display_session_code(self, session: MigrationSession) -> None:
         """Display the session code prominently."""
@@ -570,6 +799,21 @@ class MigrationWizard:
                         hint="The dump file may be corrupted. Try the migration again.",
                     )
 
+            # Handle ownership setup
+            assert self.ownership is not None
+            owner_role = None
+            no_owner = False
+
+            if self.ownership["mode"] == "postgres":
+                no_owner = True
+            elif self.ownership["mode"] == "create":
+                owner_role = self.ownership["role_name"]
+                # Create role if needed (has password = new role)
+                if owner_role and self.ownership["role_password"] is not None:
+                    if not self._role_exists(owner_role):
+                        self._create_role(owner_role, self.ownership["role_password"])
+            # mode == "original" uses default behavior (preserve owners)
+
             # Drop existing database if needed
             if self.pgdump.database_exists(session.database):
                 console.step(f"Dropping existing database '{session.database}'...")
@@ -592,10 +836,16 @@ class MigrationWizard:
                 session.database,
                 create=True,
                 jobs=4,
+                no_owner=no_owner,
+                owner=owner_role,
             )
             elapsed = time.time() - start_time
 
             console.success(f"Database restored in {self._format_duration(elapsed)}")
+
+            # Reassign ownership if a specific owner was requested
+            if owner_role:
+                self._reassign_ownership(session.database, owner_role)
 
     def _verify_migration(self, session: MigrationSession) -> None:
         """Verify migration by comparing row counts."""
