@@ -343,7 +343,7 @@ class CommandExecutor:
         # Build format() call with proper quoting
         # format_args are passed as psql variables
         args_list = list(format_args.values())
-        format_placeholders = ", ".join(f":{k}" for k in format_args.keys())
+        format_placeholders = ", ".join(f":'{k}'" for k in format_args.keys())
 
         if format_placeholders:
             sql = f"SELECT format($${sql_template}$$, {format_placeholders})"
