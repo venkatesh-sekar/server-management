@@ -79,6 +79,38 @@ class PgDumpService:
         self.pg_port = pg_port
         self.pg_user = pg_user
         self.pg_admin_db = pg_admin_db
+        self._use_peer_auth = self._is_local_host(pg_host)
+
+    @staticmethod
+    def _is_local_host(host: str | None) -> bool:
+        """Return True if host refers to the local server or a socket path."""
+        if not host:
+            return True
+        host = host.strip()
+        return host in {"127.0.0.1", "localhost", "::1"} or host.startswith("/")
+
+    def _connection_args(
+        self,
+        *,
+        include_database: bool = False,
+        database: str | None = None,
+    ) -> tuple[list[str], str | None]:
+        """Build connection args and determine if sudo is required for peer auth."""
+        args: list[str] = []
+        as_user: str | None = None
+
+        if self._use_peer_auth:
+            as_user = self.pg_user
+            args.extend(["-p", str(self.pg_port)])
+        else:
+            args.extend(
+                ["-h", self.pg_host, "-p", str(self.pg_port), "-U", self.pg_user]
+            )
+
+        if include_database and database:
+            args.extend(["-d", database])
+
+        return args, as_user
 
     def check_commands_available(self) -> tuple[bool, list[str]]:
         """Check if pg_dump and pg_restore are available.
@@ -103,15 +135,17 @@ class PgDumpService:
         if self.ctx.dry_run:
             return "18.0"
 
-        cmd = [
-            "psql", "-h", self.pg_host, "-p", str(self.pg_port),
-            "-U", self.pg_user, "-d", self.pg_admin_db,
-            "-t", "-c", "SHOW server_version;",
-        ]
+        cmd = ["psql"]
+        conn_args, as_user = self._connection_args(
+            include_database=True, database=self.pg_admin_db
+        )
+        cmd.extend(conn_args)
+        cmd.extend(["-t", "-c", "SHOW server_version;"])
         result = self.executor.run(
             cmd,
             description="Get PostgreSQL version",
             check=True,
+            as_user=as_user,
         )
         return result.stdout.strip()
 
@@ -137,15 +171,17 @@ class PgDumpService:
         ORDER BY datname;
         """
 
-        cmd = [
-            "psql", "-h", self.pg_host, "-p", str(self.pg_port),
-            "-U", self.pg_user, "-d", self.pg_admin_db,
-            "-t", "-A", "-F", "|", "-c", sql,
-        ]
+        cmd = ["psql"]
+        conn_args, as_user = self._connection_args(
+            include_database=True, database=self.pg_admin_db
+        )
+        cmd.extend(conn_args)
+        cmd.extend(["-t", "-A", "-F", "|", "-c", sql])
         result = self.executor.run(
             cmd,
             description="List databases",
             check=True,
+            as_user=as_user,
         )
 
         databases = []
@@ -230,16 +266,17 @@ class PgDumpService:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Build pg_dump command
-        cmd = [
-            "pg_dump",
-            "-h", self.pg_host,
-            "-p", str(self.pg_port),
-            "-U", self.pg_user,
-            "-d", database,
-            "-Fc",  # Custom format
-            f"-Z{compression_level}",  # Compression
-            "-f", str(output_path),
-        ]
+        cmd = ["pg_dump"]
+        conn_args, as_user = self._connection_args(
+            include_database=True, database=database
+        )
+        cmd.extend(conn_args)
+        cmd.extend([
+            "-Fc",
+            f"-Z{compression_level}",
+            "-f",
+            str(output_path),
+        ])
 
         # Note: pg_dump -j only works with directory format (-Fd), not custom format (-Fc)
         # Parallel restore is supported via pg_restore -j
@@ -260,6 +297,7 @@ class PgDumpService:
                 cmd,
                 description=f"Dump database {database}",
                 check=True,
+                as_user=as_user,
             )
 
             # Calculate checksum
@@ -306,14 +344,14 @@ class PgDumpService:
         # Ensure output directory exists
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        cmd = [
-            "pg_dumpall",
-            "-h", self.pg_host,
-            "-p", str(self.pg_port),
-            "-U", self.pg_user,
-            "-g",  # Globals only (roles, tablespaces)
-            "-f", str(output_path),
-        ]
+        cmd = ["pg_dumpall"]
+        conn_args, as_user = self._connection_args()
+        cmd.extend(conn_args)
+        cmd.extend([
+            "-g",
+            "-f",
+            str(output_path),
+        ])
 
         console.step("Dumping global objects (roles, tablespaces)...")
 
@@ -322,6 +360,7 @@ class PgDumpService:
                 cmd,
                 description="Dump globals",
                 check=True,
+                as_user=as_user,
             )
             return output_path
 
@@ -421,24 +460,25 @@ class PgDumpService:
         # Create database if needed
         if create and not self.database_exists(target_database):
             console.step(f"Creating database '{target_database}'...")
+            cmd = ["psql"]
+            conn_args, as_user = self._connection_args(
+                include_database=True, database=self.pg_admin_db
+            )
+            cmd.extend(conn_args)
+            cmd.extend(["-c", f'CREATE DATABASE "{target_database}";'])
             self.executor.run(
-                [
-                    "psql", "-h", self.pg_host, "-p", str(self.pg_port),
-                    "-U", self.pg_user, "-d", self.pg_admin_db, "-c",
-                    f'CREATE DATABASE "{target_database}";',
-                ],
+                cmd,
                 description=f"Create database {target_database}",
                 check=True,
+                as_user=as_user,
             )
 
         # Build pg_restore command
-        cmd = [
-            "pg_restore",
-            "-h", self.pg_host,
-            "-p", str(self.pg_port),
-            "-U", self.pg_user,
-            "-d", target_database,
-        ]
+        cmd = ["pg_restore"]
+        conn_args, restore_as_user = self._connection_args(
+            include_database=True, database=target_database
+        )
+        cmd.extend(conn_args)
 
         # Add parallel jobs
         if jobs > 1:
@@ -465,6 +505,7 @@ class PgDumpService:
                 cmd,
                 description=f"Restore to {target_database}",
                 check=False,
+                as_user=restore_as_user,
             )
 
             # Check for actual errors (not just warnings)
@@ -484,14 +525,19 @@ class PgDumpService:
 
             # Set owner if specified
             if owner:
+                alter_cmd = ["psql"]
+                conn_args, as_user = self._connection_args(
+                    include_database=True, database=self.pg_admin_db
+                )
+                alter_cmd.extend(conn_args)
+                alter_cmd.extend(
+                    ["-c", f'ALTER DATABASE "{target_database}" OWNER TO "{owner}";']
+                )
                 self.executor.run(
-                    [
-                        "psql", "-h", self.pg_host, "-p", str(self.pg_port),
-                        "-U", self.pg_user, "-d", self.pg_admin_db, "-c",
-                        f'ALTER DATABASE "{target_database}" OWNER TO "{owner}";',
-                    ],
+                    alter_cmd,
                     description=f"Set owner for {target_database}",
                     check=True,
+                    as_user=as_user,
                 )
 
             console.success(f"Restored database '{target_database}'")
@@ -523,13 +569,17 @@ class PgDumpService:
         console.step("Restoring global objects...")
 
         try:
+            cmd = ["psql"]
+            conn_args, as_user = self._connection_args(
+                include_database=True, database=self.pg_admin_db
+            )
+            cmd.extend(conn_args)
+            cmd.extend(["-f", str(sql_path)])
             self.executor.run(
-                [
-                    "psql", "-h", self.pg_host, "-p", str(self.pg_port),
-                    "-U", self.pg_user, "-d", self.pg_admin_db, "-f", str(sql_path),
-                ],
+                cmd,
                 description="Restore globals",
                 check=True,
+                as_user=as_user,
             )
             console.success("Restored global objects")
 
@@ -614,26 +664,33 @@ class PgDumpService:
                 f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "  # noqa: S608
                 f"WHERE datname = '{database}' AND pid <> pg_backend_pid();"
             )
+            term_cmd = ["psql"]
+            conn_args, as_user = self._connection_args(
+                include_database=True, database=self.pg_admin_db
+            )
+            term_cmd.extend(conn_args)
+            term_cmd.extend(["-c", terminate_sql])
             self.executor.run(
-                [
-                    "psql", "-h", self.pg_host, "-p", str(self.pg_port),
-                    "-U", self.pg_user, "-d", self.pg_admin_db, "-c", terminate_sql,
-                ],
+                term_cmd,
                 description=f"Terminate connections to {database}",
                 check=False,
+                as_user=as_user,
             )
 
         console.step(f"Dropping database '{database}'...")
 
         try:
+            drop_cmd = ["psql"]
+            conn_args, as_user = self._connection_args(
+                include_database=True, database=self.pg_admin_db
+            )
+            drop_cmd.extend(conn_args)
+            drop_cmd.extend(["-c", f'DROP DATABASE IF EXISTS "{database}";'])
             self.executor.run(
-                [
-                    "psql", "-h", self.pg_host, "-p", str(self.pg_port),
-                    "-U", self.pg_user, "-d", self.pg_admin_db, "-c",
-                    f'DROP DATABASE IF EXISTS "{database}";',
-                ],
+                drop_cmd,
                 description=f"Drop database {database}",
                 check=True,
+                as_user=as_user,
             )
 
         except Exception as e:

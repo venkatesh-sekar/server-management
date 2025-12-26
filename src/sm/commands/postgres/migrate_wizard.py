@@ -1107,9 +1107,9 @@ class MigrationWizard:
 
         # Query to get row counts for all tables (uses | as separator)
         sql = """
-        SELECT schemaname || '.' || tablename || '|' || n_live_tup
+        SELECT schemaname || '.' || relname || '|' || n_live_tup
         FROM pg_stat_user_tables
-        ORDER BY schemaname, tablename;
+        ORDER BY schemaname, relname;
         """
 
         result = self.executor.run_sql(
