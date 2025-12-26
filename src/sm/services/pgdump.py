@@ -180,17 +180,15 @@ class PgDumpService:
         if self.ctx.dry_run:
             return True
 
-        result = self.executor.run(
-            [
-                "psql", "-h", self.pg_host, "-p", str(self.pg_port),
-                "-U", self.pg_user, "-d", self.pg_admin_db, "-t", "-c",
-                # Database name validated by caller via validate_identifier
-                f"SELECT 1 FROM pg_database WHERE datname = '{database}';",  # noqa: S608
-            ],
-            description=f"Check database {database} exists",
+        # Use Unix socket auth (peer) to avoid password prompts
+        result = self.executor.run_sql_format(
+            "SELECT 1 FROM pg_database WHERE datname = %L",
+            database=self.pg_admin_db,
+            as_user=self.pg_user,
             check=False,
+            db_name=database,
         )
-        return "1" in result.stdout
+        return bool(result.strip())
 
     def dump_database(
         self,
