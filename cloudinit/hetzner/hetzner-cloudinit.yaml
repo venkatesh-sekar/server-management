@@ -1,0 +1,12 @@
+#cloud-config
+# Minimal cloud-init - just install SM CLI and run setup
+# Customize the sm setup flags below for your needs
+
+package_update: true
+
+packages:
+  - curl
+
+runcmd:
+  - curl -fsSL https://raw.githubusercontent.com/venkatesh-sekar/server-management/main/install.sh | bash
+  - sm setup --docker --security --mtu 1450 -y
