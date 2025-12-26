@@ -669,9 +669,9 @@ class MigrationWizard:
             console.dry_run_msg(f"Would reassign ownership to '{new_owner}'")
             return
 
-        console.step(f"Reassigning ownership to '{new_owner}'...")
+        console.step(f"Applying ownership settings for '{new_owner}'...")
 
-        # Change database owner
+        # Change database owner (requires connection to postgres)
         self.executor.run_sql_format(
             "ALTER DATABASE %I OWNER TO %I",
             database="postgres",
@@ -680,15 +680,15 @@ class MigrationWizard:
             owner=new_owner,
         )
 
-        # Reassign all objects in the database
+        # Ensure public schema is owned by the requested role
         self.executor.run_sql_format(
-            "REASSIGN OWNED BY postgres TO %I",
+            "ALTER SCHEMA public OWNER TO %I",
             database=database,
             as_user="postgres",
             owner=new_owner,
         )
 
-        console.success(f"Ownership reassigned to '{new_owner}'")
+        console.success(f"Ownership updated for '{new_owner}'")
 
     def _display_session_code(self, session: MigrationSession) -> None:
         """Display the session code prominently."""

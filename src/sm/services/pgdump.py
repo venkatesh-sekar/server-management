@@ -9,6 +9,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from sm.core.context import ExecutionContext
 from sm.core.exceptions import BackupError
@@ -460,17 +461,19 @@ class PgDumpService:
         # Create database if needed
         if create and not self.database_exists(target_database):
             console.step(f"Creating database '{target_database}'...")
-            cmd = ["psql"]
-            conn_args, as_user = self._connection_args(
-                include_database=True, database=self.pg_admin_db
+            create_sql = (
+                "CREATE DATABASE %I OWNER %I"
+                if owner
+                else "CREATE DATABASE %I"
             )
-            cmd.extend(conn_args)
-            cmd.extend(["-c", f'CREATE DATABASE "{target_database}";'])
-            self.executor.run(
-                cmd,
-                description=f"Create database {target_database}",
-                check=True,
-                as_user=as_user,
+            format_args: dict[str, Any] = {"db_name": target_database}
+            if owner:
+                format_args["owner"] = owner
+            self.executor.run_sql_format(
+                create_sql,
+                database=self.pg_admin_db,
+                as_user=self.pg_user,
+                **format_args,
             )
 
         # Build pg_restore command
@@ -490,6 +493,9 @@ class PgDumpService:
 
         if no_owner or owner:
             cmd.append("--no-owner")
+
+        if owner:
+            cmd.extend(["--role", owner])
 
         if self.ctx.is_verbose:
             cmd.append("-v")
