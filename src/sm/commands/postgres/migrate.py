@@ -21,6 +21,7 @@ from sm.core import (
     ExecutionError,
     PrerequisiteError,
     SafetyError,
+    SMError,
     ValidationError,
     console,
     create_context,
@@ -979,3 +980,46 @@ def migrate_cluster(
         )
         console.error(str(e))
         raise typer.Exit(12) from None
+
+
+@app.command("wizard")
+def migrate_wizard_cmd(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview without executing"),
+    verbose: int = typer.Option(0, "--verbose", "-v", count=True, help="Increase verbosity"),
+) -> None:
+    """Interactive migration wizard using S3 for coordination.
+
+    Migrate a PostgreSQL database between two hosts without SSH.
+    Uses S3 as intermediate storage and coordination mechanism.
+
+    Run on BOTH the source and target hosts - uses a shared session code
+    to coordinate the migration.
+
+    \b
+    How it works:
+      1. Run wizard on TARGET host - creates a session code
+      2. Run wizard on SOURCE host - enter the code
+      3. SOURCE exports database to S3
+      4. TARGET auto-detects and imports
+
+    \b
+    Examples:
+        # On target host (creates session)
+        sm postgres migrate wizard
+
+        # On source host (joins with code)
+        sm postgres migrate wizard
+    """
+    from sm.commands.postgres.migrate_wizard import MigrationWizard
+
+    try:
+        wizard = MigrationWizard(
+            dry_run=dry_run,
+            verbose=verbose,
+        )
+        wizard.run()
+    except SMError as e:
+        console.error(str(e))
+        if e.hint:
+            console.hint(e.hint)
+        raise typer.Exit(e.exit_code) from None
