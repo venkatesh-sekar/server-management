@@ -565,14 +565,30 @@ class MigrationWizard:
 
                 break
 
-            # Password
+            # Password for the new role
             console.print()
-            console.print("  [dim]Password for the new role (leave empty for no login)[/dim]")
-            raw_password = getpass.getpass("  Password: ")
-            role_password: str | None = raw_password.strip() if raw_password else None
+            console.print(f"  [bold]Password for '{role_name}':[/bold]")
+            console.print("  [dim]This sets the login password for the new database role.[/dim]")
+            console.print("  [dim]Leave empty if this role should not have login access.[/dim]")
+            console.print()
+
+            while True:
+                raw_password = getpass.getpass(f"  Password for {role_name}: ")
+                role_password: str | None = raw_password.strip() if raw_password else None
+
+                if role_password:
+                    # Confirm password
+                    confirm_password = getpass.getpass("  Confirm password: ")
+                    if confirm_password != role_password:
+                        console.warn("Passwords do not match, try again")
+                        continue
+                break
 
             console.print()
-            console.print(f"  Selected: Create role [bold]{role_name}[/bold]")
+            if role_password:
+                console.print(f"  Selected: Create role [bold]{role_name}[/bold] with login")
+            else:
+                console.print(f"  Selected: Create role [bold]{role_name}[/bold] (no login)")
             console.print()
 
             return OwnershipChoice(
@@ -598,17 +614,15 @@ class MigrationWizard:
         if self.ctx.dry_run:
             return False
 
-        # Role name is validated to start with letter/underscore in _prompt_create_role
-        result = self.executor.run(
-            [
-                "psql", "-h", "127.0.0.1", "-p", "5432",
-                "-U", "postgres", "-d", "postgres",
-                "-tAc", f"SELECT 1 FROM pg_roles WHERE rolname = '{role_name}';",  # noqa: S608
-            ],
-            description=f"Check role {role_name}",
+        # Use run_sql with format() for safe interpolation
+        result = self.executor.run_sql_format(
+            "SELECT 1 FROM pg_roles WHERE rolname = %L",
+            database="postgres",
+            as_user="postgres",
             check=False,
+            role_name=role_name,
         )
-        return result.stdout.strip() == "1"
+        return bool(result.strip())
 
     def _create_role(self, role_name: str, password: str | None) -> None:
         """Create a PostgreSQL role.
@@ -621,23 +635,26 @@ class MigrationWizard:
             console.dry_run_msg(f"Would create role '{role_name}'")
             return
 
+        console.step(f"Creating role '{role_name}'...")
+
         if password:
-            # Role with login
-            sql = f"CREATE ROLE \"{role_name}\" LOGIN PASSWORD '{password}';"
+            # Role with login - use format() for safe interpolation
+            self.executor.run_sql_format(
+                "CREATE ROLE %I LOGIN PASSWORD %L",
+                database="postgres",
+                as_user="postgres",
+                role_name=role_name,
+                password=password,
+            )
         else:
             # Role without login
-            sql = f"CREATE ROLE \"{role_name}\";"
+            self.executor.run_sql_format(
+                "CREATE ROLE %I",
+                database="postgres",
+                as_user="postgres",
+                role_name=role_name,
+            )
 
-        console.step(f"Creating role '{role_name}'...")
-        self.executor.run(
-            [
-                "psql", "-h", "127.0.0.1", "-p", "5432",
-                "-U", "postgres", "-d", "postgres",
-                "-c", sql,
-            ],
-            description=f"Create role {role_name}",
-            check=True,
-        )
         console.success(f"Role '{role_name}' created")
 
     def _reassign_ownership(self, database: str, new_owner: str) -> None:
@@ -654,25 +671,20 @@ class MigrationWizard:
         console.step(f"Reassigning ownership to '{new_owner}'...")
 
         # Change database owner
-        self.executor.run(
-            [
-                "psql", "-h", "127.0.0.1", "-p", "5432",
-                "-U", "postgres", "-d", "postgres",
-                "-c", f'ALTER DATABASE "{database}" OWNER TO "{new_owner}";',
-            ],
-            description=f"Change database owner to {new_owner}",
-            check=True,
+        self.executor.run_sql_format(
+            "ALTER DATABASE %I OWNER TO %I",
+            database="postgres",
+            as_user="postgres",
+            db_name=database,
+            owner=new_owner,
         )
 
         # Reassign all objects in the database
-        self.executor.run(
-            [
-                "psql", "-h", "127.0.0.1", "-p", "5432",
-                "-U", "postgres", "-d", database,
-                "-c", f'REASSIGN OWNED BY postgres TO "{new_owner}";',
-            ],
-            description=f"Reassign objects to {new_owner}",
-            check=True,
+        self.executor.run_sql_format(
+            "REASSIGN OWNED BY postgres TO %I",
+            database=database,
+            as_user="postgres",
+            owner=new_owner,
         )
 
         console.success(f"Ownership reassigned to '{new_owner}'")
@@ -817,14 +829,11 @@ class MigrationWizard:
             # Drop existing database if needed
             if self.pgdump.database_exists(session.database):
                 console.step(f"Dropping existing database '{session.database}'...")
-                self.executor.run(
-                    [
-                        "psql", "-h", "127.0.0.1", "-p", "5432",
-                        "-U", "postgres", "-d", "postgres", "-c",
-                        f'DROP DATABASE IF EXISTS "{session.database}";',
-                    ],
-                    description=f"Drop database {session.database}",
-                    check=True,
+                self.executor.run_sql_format(
+                    "DROP DATABASE IF EXISTS %I",
+                    database="postgres",
+                    as_user="postgres",
+                    db_name=session.database,
                 )
 
             # Import database
@@ -1096,26 +1105,21 @@ class MigrationWizard:
         if self.ctx.dry_run:
             return {}
 
-        # Query to get row counts for all tables
+        # Query to get row counts for all tables (uses | as separator)
         sql = """
-        SELECT schemaname || '.' || tablename as table_name,
-               n_live_tup as row_count
+        SELECT schemaname || '.' || tablename || '|' || n_live_tup
         FROM pg_stat_user_tables
         ORDER BY schemaname, tablename;
         """
 
-        result = self.executor.run(
-            [
-                "psql", "-h", "127.0.0.1", "-p", "5432",
-                "-U", "postgres", "-d", database,
-                "-t", "-A", "-F", "|", "-c", sql,
-            ],
-            description="Get row counts",
-            check=True,
+        result = self.executor.run_sql(
+            sql,
+            database=database,
+            as_user="postgres",
         )
 
         counts = {}
-        for line in result.stdout.strip().split("\n"):
+        for line in result.strip().split("\n"):
             if line and "|" in line:
                 parts = line.split("|")
                 if len(parts) >= 2:
