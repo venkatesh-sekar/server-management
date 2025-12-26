@@ -317,18 +317,19 @@ class CommandExecutor:
         check: bool = True,
         **format_args: Any,
     ) -> str:
-        """Execute SQL using PostgreSQL format() for safe interpolation.
+        """Execute SQL while safely interpolating identifiers and literals.
 
-        This is the safest way to include dynamic values in SQL.
-        Use %I for identifiers and %L for literals.
+        This mirrors PostgreSQL's format() helper for %I (identifiers) and %L
+        (literals) so we can build safe statements without relying on psql's
+        variable expansion quirks.
 
         Args:
-            sql_template: SQL with format() placeholders
+            sql_template: SQL with %I/%L placeholders
             database: Database to connect to
             as_user: PostgreSQL user
             description: Human-readable description
             check: Raise exception on error
-            **format_args: Arguments for format()
+            **format_args: Arguments consumed in the order they are passed
 
         Returns:
             Query output
@@ -340,39 +341,97 @@ class CommandExecutor:
                 owner="myuser",
             )
         """
-        # Build format() call with proper quoting
-        # format_args are passed as psql variables
-        args_list = list(format_args.values())
-        format_placeholders = ", ".join(f":'{k}'" for k in format_args.keys())
+        sql = (
+            self._format_sql_template(sql_template, format_args)
+            if format_args
+            else sql_template
+        )
 
-        if format_placeholders:
-            sql = f"SELECT format($${sql_template}$$, {format_placeholders})"
-            result = self.run_sql(
-                sql,
-                database=database,
-                as_user=as_user,
-                description=None,  # We'll describe the actual operation
-                variables=format_args,
-                check=check,
-            )
-            # Execute the formatted SQL
-            if result and not self.ctx.dry_run:
-                return self.run_sql(
-                    result,
-                    database=database,
-                    as_user=as_user,
-                    description=description,
-                    check=check,
+        return self.run_sql(
+            sql,
+            database=database,
+            as_user=as_user,
+            description=description,
+            check=check,
+        )
+
+    def _format_sql_template(
+        self,
+        sql_template: str,
+        format_args: dict[str, Any],
+    ) -> str:
+        """Replace %I/%L placeholders with safely quoted values."""
+        args = list(format_args.items())
+        arg_index = 0
+        formatted: list[str] = []
+        i = 0
+        length = len(sql_template)
+
+        while i < length:
+            char = sql_template[i]
+            if char != "%":
+                formatted.append(char)
+                i += 1
+                continue
+
+            if i + 1 >= length:
+                raise ValueError(f"Dangling % in SQL template: {sql_template!r}")
+
+            specifier = sql_template[i + 1]
+            i += 2
+
+            if specifier == "%":
+                formatted.append("%")
+                continue
+
+            if specifier not in ("I", "L"):
+                raise ValueError(
+                    f"Unsupported format specifier %{specifier} in SQL template"
                 )
-            return result
-        else:
-            return self.run_sql(
-                sql_template,
-                database=database,
-                as_user=as_user,
-                description=description,
-                check=check,
+
+            if arg_index >= len(args):
+                raise ValueError(
+                    "Not enough format arguments supplied for SQL template"
+                )
+
+            _, value = args[arg_index]
+            arg_index += 1
+
+            if specifier == "I":
+                formatted.append(self._quote_identifier(value))
+            else:
+                formatted.append(self._quote_literal(value))
+
+        if arg_index < len(args):
+            raise ValueError(
+                "Too many format arguments supplied for SQL template"
             )
+
+        return "".join(formatted)
+
+    @staticmethod
+    def _quote_identifier(value: Any) -> str:
+        """Quote SQL identifiers safely."""
+        if value is None:
+            raise ValueError("Identifier value cannot be NULL")
+
+        text = str(value)
+        escaped = text.replace('"', '""')
+        return f'"{escaped}"'
+
+    @staticmethod
+    def _quote_literal(value: Any) -> str:
+        """Quote SQL literals safely (NULL is returned unquoted)."""
+        if value is None:
+            return "NULL"
+
+        if isinstance(value, bool):
+            text = "true" if value else "false"
+        else:
+            text = str(value)
+
+        escaped = text.replace("'", "''")
+        return f"'{escaped}'"
 
     def check_sql(
         self,
