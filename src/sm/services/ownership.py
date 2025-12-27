@@ -20,6 +20,7 @@ class DatabaseObject:
     name: str  # object name
     owner: str  # current owner
     signature: str | None = None  # for functions: name(arg_types)
+    is_linked: bool = False  # True if sequence is linked to a table column
 
     @property
     def qualified_name(self) -> str:
@@ -56,39 +57,50 @@ class DatabaseObject:
 
 # SQL query to fetch all objects with their owners
 _LIST_OBJECTS_SQL = """
-WITH objects AS (
+WITH linked_sequences AS (
+    -- Find sequences that are linked to table columns (SERIAL, IDENTITY, etc.)
+    SELECT d.objid as seq_oid
+    FROM pg_depend d
+    JOIN pg_class c ON d.objid = c.oid
+    WHERE c.relkind = 'S'  -- Sequence
+      AND d.deptype = 'a'  -- Auto dependency (owned by column)
+),
+objects AS (
     -- Tables
     SELECT 'table'::text as object_type, schemaname as schema, tablename as name,
-           tableowner as owner, NULL::text as signature
+           tableowner as owner, NULL::text as signature, false as is_linked
     FROM pg_tables
     WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
 
     UNION ALL
 
     -- Views
-    SELECT 'view', schemaname, viewname, viewowner, NULL
+    SELECT 'view', schemaname, viewname, viewowner, NULL, false
     FROM pg_views
     WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
 
     UNION ALL
 
     -- Materialized Views
-    SELECT 'materialized_view', schemaname, matviewname, matviewowner, NULL
+    SELECT 'materialized_view', schemaname, matviewname, matviewowner, NULL, false
     FROM pg_matviews
     WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
 
     UNION ALL
 
-    -- Sequences
-    SELECT 'sequence', schemaname, sequencename, sequenceowner, NULL
-    FROM pg_sequences
-    WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+    -- Sequences (with is_linked flag)
+    SELECT 'sequence', n.nspname, c.relname, pg_get_userbyid(c.relowner), NULL,
+           EXISTS(SELECT 1 FROM linked_sequences ls WHERE ls.seq_oid = c.oid)
+    FROM pg_class c
+    JOIN pg_namespace n ON c.relnamespace = n.oid
+    WHERE c.relkind = 'S'
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
 
     UNION ALL
 
     -- Functions (including signature for ALTER)
     SELECT 'function', n.nspname, p.proname, pg_get_userbyid(p.proowner),
-           p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+           p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', false
     FROM pg_proc p
     JOIN pg_namespace n ON p.pronamespace = n.oid
     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
@@ -98,7 +110,7 @@ WITH objects AS (
 
     -- Procedures
     SELECT 'procedure', n.nspname, p.proname, pg_get_userbyid(p.proowner),
-           p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+           p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', false
     FROM pg_proc p
     JOIN pg_namespace n ON p.pronamespace = n.oid
     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
@@ -108,7 +120,7 @@ WITH objects AS (
 
     -- Aggregates
     SELECT 'aggregate', n.nspname, p.proname, pg_get_userbyid(p.proowner),
-           p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+           p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', false
     FROM pg_proc p
     JOIN pg_namespace n ON p.pronamespace = n.oid
     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
@@ -117,7 +129,7 @@ WITH objects AS (
     UNION ALL
 
     -- Types (composite and enum only, excluding internal types)
-    SELECT 'type', n.nspname, t.typname, pg_get_userbyid(t.typowner), NULL
+    SELECT 'type', n.nspname, t.typname, pg_get_userbyid(t.typowner), NULL, false
     FROM pg_type t
     JOIN pg_namespace n ON t.typnamespace = n.oid
     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
@@ -126,7 +138,7 @@ WITH objects AS (
     UNION ALL
 
     -- Domains
-    SELECT 'domain', n.nspname, t.typname, pg_get_userbyid(t.typowner), NULL
+    SELECT 'domain', n.nspname, t.typname, pg_get_userbyid(t.typowner), NULL, false
     FROM pg_type t
     JOIN pg_namespace n ON t.typnamespace = n.oid
     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
@@ -135,7 +147,7 @@ WITH objects AS (
     UNION ALL
 
     -- Foreign Tables
-    SELECT 'foreign_table', n.nspname, c.relname, pg_get_userbyid(c.relowner), NULL
+    SELECT 'foreign_table', n.nspname, c.relname, pg_get_userbyid(c.relowner), NULL, false
     FROM pg_class c
     JOIN pg_namespace n ON c.relnamespace = n.oid
     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
@@ -144,13 +156,13 @@ WITH objects AS (
     UNION ALL
 
     -- Schemas (excluding system schemas)
-    SELECT 'schema', '', nspname, pg_get_userbyid(nspowner), NULL
+    SELECT 'schema', '', nspname, pg_get_userbyid(nspowner), NULL, false
     FROM pg_namespace
     WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
       AND nspname NOT LIKE 'pg_temp_%'
       AND nspname NOT LIKE 'pg_toast_temp_%'
 )
-SELECT object_type, schema, name, owner, signature
+SELECT object_type, schema, name, owner, signature, is_linked
 FROM objects
 ORDER BY object_type, schema, name;
 """
@@ -259,6 +271,7 @@ class OwnershipService:
                     name=parts[2].strip(),
                     owner=parts[3].strip(),
                     signature=parts[4].strip() if len(parts) > 4 and parts[4].strip() else None,
+                    is_linked=parts[5].strip() == "t" if len(parts) > 5 else False,
                 )
                 objects.append(obj)
 
@@ -326,10 +339,25 @@ class OwnershipService:
             self.ctx.console.info(f"All selected objects are already owned by '{new_owner}'")
             return []
 
+        # Separate linked sequences (they're transferred automatically with their parent table)
+        linked_sequences = [obj for obj in objects_to_transfer if obj.is_linked]
+        transferable = [obj for obj in objects_to_transfer if not obj.is_linked]
+
+        # Sort objects: schemas first, then tables, then everything else
+        # This ensures tables are transferred before their dependent objects
+        type_priority = {"schema": 0, "table": 1}
+        transferable.sort(key=lambda o: (type_priority.get(o.object_type, 2), o.schema, o.name))
+
+        if linked_sequences:
+            self.ctx.console.info(
+                f"Skipping {len(linked_sequences)} linked sequence(s) "
+                "(ownership transfers automatically with parent table)"
+            )
+
         statements: list[str] = []
         effective_dry_run = dry_run or self.ctx.dry_run
 
-        for obj in objects_to_transfer:
+        for obj in transferable:
             stmt = obj.get_alter_statement(new_owner)
             statements.append(stmt)
 
