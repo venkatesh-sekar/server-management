@@ -33,6 +33,7 @@ dependencies = [
     "rich>=13.0",
     "jinja2>=3.0",
     "pyyaml>=6.0",
+    "InquirerPy>=0.3.4",
 ]
 
 [project.optional-dependencies]

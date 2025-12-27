@@ -37,6 +37,7 @@ from sm.core.validation import validate_identifier
 from sm.services.postgresql import PostgreSQLService
 from sm.services.pgbouncer import PgBouncerService
 from sm.services.systemd import SystemdService
+from sm.commands.postgres.ownership import ownership_command, transfer_ownership_command
 
 
 class AccessLevel(str, Enum):
@@ -931,3 +932,8 @@ def reset_database(
         audit.log_failure(AuditEventType.DATABASE_MODIFY, "database", name, str(e))
         console.error(str(e))
         raise typer.Exit(10)
+
+
+# Register ownership commands
+app.command("ownership")(ownership_command)
+app.command("transfer-ownership")(transfer_ownership_command)
