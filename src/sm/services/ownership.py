@@ -128,12 +128,13 @@ objects AS (
 
     UNION ALL
 
-    -- Types (composite and enum only, excluding internal types)
+    -- Types (composite and enum only, excluding internal types and table row types)
     SELECT 'type', n.nspname, t.typname, pg_get_userbyid(t.typowner), NULL, false
     FROM pg_type t
     JOIN pg_namespace n ON t.typnamespace = n.oid
     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
       AND t.typtype IN ('c', 'e')
+      AND t.typrelid = 0  -- Exclude table row types (ownership follows the table)
 
     UNION ALL
 
