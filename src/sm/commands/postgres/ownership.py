@@ -50,15 +50,31 @@ def _interactive_select(
     Falls back to simple numbered selection if InquirerPy is not available.
     """
     # Filter out objects already owned by new_owner
-    transferable = [obj for obj in objects if obj.owner != new_owner]
+    candidates = [obj for obj in objects if obj.owner != new_owner]
+
+    if not candidates:
+        console.info(f"All objects are already owned by '{new_owner}'")
+        return []
+
+    # Separate linked sequences (they transfer automatically with parent table)
+    linked = [obj for obj in candidates if obj.is_linked]
+    transferable = [obj for obj in candidates if not obj.is_linked]
 
     if not transferable:
-        console.info(f"All objects are already owned by '{new_owner}'")
+        console.info("No objects to transfer (all are linked sequences)")
         return []
 
     try:
         from InquirerPy import inquirer  # type: ignore[import-not-found]
         from InquirerPy.separator import Separator  # type: ignore[import-not-found]
+
+        # Show note about linked sequences
+        if linked:
+            console.print()
+            console.print(
+                f"[yellow]Note:[/yellow] {len(linked)} linked sequence(s) excluded "
+                "(ownership transfers automatically with parent table)"
+            )
 
         # Group by object type for better UX
         choices = []
@@ -71,15 +87,8 @@ def _interactive_select(
                 current_type = obj.object_type
                 choices.append(Separator(f"── {obj.object_type.upper().replace('_', ' ')}S ──"))
 
-            if obj.is_linked:
-                label = (
-                    f"{obj.display_name} [dim](owner: {obj.owner}) "
-                    "[yellow](linked - auto)[/yellow][/dim]"
-                )
-                choices.append({"name": label, "value": obj, "enabled": False})
-            else:
-                label = f"{obj.display_name} [dim](owner: {obj.owner})[/dim]"
-                choices.append({"name": label, "value": obj, "enabled": True})
+            label = f"{obj.display_name} [dim](owner: {obj.owner})[/dim]"
+            choices.append({"name": label, "value": obj, "enabled": True})
 
         console.print()
         console.print(f"[bold]Select objects to transfer to '{new_owner}':[/bold]")
@@ -97,14 +106,23 @@ def _interactive_select(
 
     except ImportError:
         # Fallback to simple numbered selection
-        return _simple_select(transferable, new_owner)
+        return _simple_select(transferable, new_owner, linked_count=len(linked))
 
 
 def _simple_select(
     objects: list[DatabaseObject],
     new_owner: str,
+    *,
+    linked_count: int = 0,
 ) -> list[DatabaseObject]:
     """Simple numbered selection fallback when InquirerPy is not available."""
+    if linked_count:
+        console.print()
+        console.print(
+            f"[yellow]Note:[/yellow] {linked_count} linked sequence(s) excluded "
+            "(ownership transfers automatically with parent table)"
+        )
+
     console.print()
     console.print(f"[bold]Objects available for transfer to '{new_owner}':[/bold]")
     console.print()
@@ -119,13 +137,7 @@ def _simple_select(
     for obj_type, items in sorted(by_type.items()):
         console.print(f"[bold]{obj_type.upper().replace('_', ' ')}S:[/bold]")
         for idx, obj in items:
-            if obj.is_linked:
-                console.print(
-                    f"  [{idx}] {obj.display_name} (owner: {obj.owner}) "
-                    "[yellow](linked - auto)[/yellow]"
-                )
-            else:
-                console.print(f"  [{idx}] {obj.display_name} (owner: {obj.owner})")
+            console.print(f"  [{idx}] {obj.display_name} (owner: {obj.owner})")
         console.print()
 
     console.print("Enter object numbers to transfer (comma-separated, 'all' for all, 'q' to quit):")
@@ -321,21 +333,32 @@ def transfer_ownership_command(
         console.info("No objects match the specified filters")
         return
 
+    # Separate linked sequences upfront (they transfer automatically with parent table)
+    all_linked = [obj for obj in objects if obj.is_linked]
+    all_transferable = [obj for obj in objects if not obj.is_linked]
+
     # Select objects to transfer
     if all_objects:
-        # Non-interactive: transfer all filtered objects
-        selected = [obj for obj in objects if obj.owner != to_owner]
+        # Non-interactive: transfer all filtered objects (excluding linked sequences)
+        selected = [obj for obj in all_transferable if obj.owner != to_owner]
+        linked_skipped = len([obj for obj in all_linked if obj.owner != to_owner])
     else:
-        # Interactive selection
+        # Interactive selection (already excludes linked sequences)
         selected = _interactive_select(objects, to_owner)
+        linked_skipped = len([obj for obj in all_linked if obj.owner != to_owner])
 
     if not selected:
         console.info("No objects selected for transfer")
         return
 
-    # Show preview - separate linked sequences from transferable objects
-    linked = [obj for obj in selected if obj.is_linked]
-    transferable = [obj for obj in selected if not obj.is_linked]
+    # For --all mode, show note about linked sequences
+    if all_objects and linked_skipped:
+        console.print(
+            f"[yellow]Note:[/yellow] {linked_skipped} linked sequence(s) excluded "
+            "(ownership transfers automatically with parent table)"
+        )
+
+    transferable = selected  # All selected objects are transferable (linked already excluded)
 
     console.print()
     console.print(f"[bold]Will transfer {len(transferable)} objects to '{to_owner}':[/bold]")
@@ -345,19 +368,7 @@ def transfer_ownership_command(
         stmt = obj.get_alter_statement(to_owner)
         console.print(f"  [dim]{stmt}[/dim]")
 
-    if linked:
-        console.print()
-        console.print(
-            f"[yellow]Note:[/yellow] {len(linked)} linked sequence(s) will be skipped "
-            "(ownership transfers automatically with parent table)"
-        )
-
     console.print()
-
-    # Check if there's anything to transfer
-    if not transferable:
-        console.info("No objects to transfer (all selected objects are linked sequences)")
-        return
 
     # Confirm
     if not yes and not dry_run:
@@ -380,8 +391,8 @@ def transfer_ownership_command(
         else:
             console.print()
             msg = f"Transferred ownership of {len(statements)} objects to '{to_owner}'"
-            if linked:
-                msg += f" ({len(linked)} linked sequences handled automatically)"
+            if linked_skipped:
+                msg += f" ({linked_skipped} linked sequences handled automatically)"
             console.success(msg)
 
     except PostgresError as e:
