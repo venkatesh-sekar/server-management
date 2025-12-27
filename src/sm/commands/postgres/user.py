@@ -4,7 +4,7 @@ Commands:
 - sm postgres user create
 - sm postgres user list
 - sm postgres user verify
-- sm postgres user rotate-password
+- sm postgres user rotate
 - sm postgres user delete
 """
 
@@ -359,7 +359,7 @@ def verify_user(
                 console.print()
                 console.print("[red]Password authentication failed[/red]")
                 console.hint("The stored password may be out of sync. Try rotating:")
-                console.hint(f"  sm postgres user rotate-password -u {username} -d {database}")
+                console.hint(f"  sm postgres user rotate -u {username} -d {database}")
             elif "does not exist" in result.stderr:
                 console.print()
                 console.print(f"[red]Database '{database}' does not exist[/red]")
@@ -381,7 +381,7 @@ def verify_user(
         raise typer.Exit(1)
 
 
-@app.command("rotate-password")
+@app.command("rotate")
 @require_root
 def rotate_password(
     username: str = typer.Option(
@@ -409,9 +409,9 @@ def rotate_password(
 
     Example:
 
-        sm postgres user rotate-password -u myapp_user
+        sm postgres user rotate -u myapp_user
 
-        sm postgres user rotate-password -u myapp_user -d myapp
+        sm postgres user rotate -u myapp_user -d myapp
     """
     ctx = create_context(dry_run=dry_run, force=force, yes=yes, verbose=verbose)
     audit = get_audit_logger()

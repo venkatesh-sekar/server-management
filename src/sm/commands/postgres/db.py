@@ -2,53 +2,49 @@
 
 Commands:
 - sm postgres db create
-- sm postgres db create-with-user
 - sm postgres db list
-- sm postgres db grant
 - sm postgres db drop
 - sm postgres db reset
+- sm postgres db ownership
+- sm postgres db transfer
+- sm postgres db extension enable
+- sm postgres db extension list
 """
 
-from enum import Enum
-from typing import Optional
 
 import typer
 from rich.table import Table
 
+from sm.commands.postgres.ownership import ownership_command, transfer_ownership_command
 from sm.core import (
-    console,
-    ExecutionContext,
-    create_context,
-    CommandExecutor,
-    CredentialManager,
-    get_credential_manager,
-    get_audit_logger,
     AuditEventType,
-    AuditResult,
-    require_root,
-    require_force,
-    run_preflight_checks,
-    check_not_protected_database,
-    DangerLevel,
-    ValidationError,
+    CommandExecutor,
+    ExecutionContext,
     PostgresError,
+    ValidationError,
+    check_not_protected_database,
+    console,
+    create_context,
+    get_audit_logger,
+    require_force,
+    require_root,
+    run_preflight_checks,
 )
 from sm.core.validation import validate_identifier
-from sm.services.postgresql import PostgreSQLService
 from sm.services.pgbouncer import PgBouncerService
+from sm.services.postgresql import EXTENSION_PACKAGES, PostgreSQLService
 from sm.services.systemd import SystemdService
-from sm.commands.postgres.ownership import ownership_command, transfer_ownership_command
-
-
-class AccessLevel(str, Enum):
-    """Database access levels."""
-    READONLY = "readonly"
-    READWRITE = "readwrite"
-
 
 app = typer.Typer(
     name="db",
     help="PostgreSQL database management.",
+    no_args_is_help=True,
+)
+
+# Extension subgroup
+extension_app = typer.Typer(
+    name="extension",
+    help="PostgreSQL extension management.",
     no_args_is_help=True,
 )
 
@@ -69,7 +65,7 @@ def create_database(
         ..., "--database", "-d",
         help="Database name",
     ),
-    owner: Optional[str] = typer.Option(
+    owner: str | None = typer.Option(
         None, "--owner", "-o",
         help="Owner username (existing user)",
     ),
@@ -191,170 +187,6 @@ def create_database(
         raise typer.Exit(10)
 
 
-@app.command("create-with-user")
-@require_root
-def create_database_with_user(
-    database: str = typer.Option(
-        ..., "--database", "-d",
-        help="Database name",
-    ),
-    username: Optional[str] = typer.Option(
-        None, "--user", "-u",
-        help="Username (default: <database>_user)",
-    ),
-    password: Optional[str] = typer.Option(
-        None, "--password", "-p",
-        help="Password (auto-generated if not provided)",
-        hide_input=True,
-    ),
-    with_pgvector: bool = typer.Option(
-        False, "--with-pgvector",
-        help="Enable pgvector extension for vector similarity search",
-    ),
-    skip_pgbouncer: bool = typer.Option(
-        False, "--skip-pgbouncer",
-        help="Skip PgBouncer configuration",
-    ),
-    # Global options
-    dry_run: bool = typer.Option(False, "--dry-run", help="Preview without executing"),
-    force: bool = typer.Option(False, "--force", help="Allow updating existing resources"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmations"),
-    verbose: int = typer.Option(0, "--verbose", "-v", count=True, help="Increase verbosity"),
-) -> None:
-    """Create a database with a new owner user.
-
-    This is the most common operation - creates a database and a user
-    with full ownership. The database is hardened with minimal public
-    privileges.
-
-    Examples:
-
-        sm postgres db create-with-user -d myapp
-
-        sm postgres db create-with-user -d myapp -u myapp_admin
-
-        sm postgres db create-with-user -d myapp --with-pgvector
-
-        sm postgres db create-with-user -d myapp --dry-run
-    """
-    ctx = create_context(dry_run=dry_run, force=force, yes=yes, verbose=verbose)
-    audit = get_audit_logger()
-    creds = get_credential_manager()
-
-    # Default username
-    if not username:
-        username = f"{database}_user"
-
-    # Validate
-    try:
-        validate_identifier(database, "database")
-        validate_identifier(username, "username")
-    except ValidationError as e:
-        console.error(str(e))
-        raise typer.Exit(3)
-
-    # Run preflight checks
-    run_preflight_checks(dry_run=ctx.dry_run, verbose=ctx.is_verbose)
-
-    # Get services
-    executor, pg, pgb = _get_services(ctx)
-
-    # Check if already exists
-    if pg.database_exists(database) and not force:
-        console.error(f"Database '{database}' already exists. Use --force to update.")
-        raise typer.Exit(1)
-
-    # Ensure password
-    if password:
-        final_password = password
-        generated = False
-    else:
-        final_password, generated = creds.ensure_password(username, database, dry_run=dry_run)
-        if generated:
-            console.info("Generated new secure password")
-
-    # Confirmation
-    console.print()
-    console.print("[bold]Configuration[/bold]")
-    console.print(f"  Database:  {database}")
-    console.print(f"  User:      {username} (owner)")
-    console.print(f"  pgvector:  {'Enabled' if with_pgvector else 'Disabled'}")
-    console.print(f"  PgBouncer: {'Skipped' if skip_pgbouncer else 'Enabled'}")
-    console.print()
-
-    if not yes and not dry_run:
-        if not console.confirm(f"Create database '{database}' with owner '{username}'?"):
-            console.warn("Operation cancelled")
-            raise typer.Exit(0)
-
-    try:
-        with executor.transaction() as rollback:
-            # Create user first
-            pg.create_user(username, final_password, rollback=rollback)
-
-            # Create database
-            pg.create_database(database, owner=username, rollback=rollback)
-
-            # Harden database
-            pg.harden_database(database, username)
-
-            # Enable pgvector if requested
-            if with_pgvector:
-                pg.install_extension_package("vector")
-                pg.enable_extension(database, "vector", rollback=rollback)
-
-            # Verify connection
-            pg.verify_connection(database, username, final_password)
-
-            # Update PgBouncer
-            if not skip_pgbouncer and pgb.is_installed():
-                scram_hash = pg.get_scram_hash(username)
-                if scram_hash:
-                    pgb.update_userlist(username, scram_hash)
-                pgb.add_database(database)
-                pgb.reload()
-
-            rollback.commit()
-
-        # Store password
-        if not dry_run:
-            creds.store_password(final_password, username, database)
-
-        # Log success
-        audit.log_success(
-            AuditEventType.DATABASE_CREATE,
-            "database",
-            database,
-            message=f"Database created with owner {username}"
-                    + (", pgvector enabled" if with_pgvector else ""),
-        )
-
-        # Summary
-        pass_file = creds.get_password_path(username, database)
-        summary_data = {
-            "Database": database,
-            "User": f"{username} (owner)",
-            "Password file": str(pass_file),
-            "Direct connection": f"postgresql://{username}:***@127.0.0.1:5432/{database}",
-        }
-        if with_pgvector:
-            summary_data["pgvector"] = "Enabled"
-
-        console.print()
-        console.summary(
-            "Database and User Created",
-            summary_data,
-        )
-
-        if not skip_pgbouncer and pgb.is_installed():
-            console.print(f"  PgBouncer: postgresql://{username}:***@127.0.0.1:6432/{database}")
-
-    except PostgresError as e:
-        audit.log_failure(AuditEventType.DATABASE_CREATE, "database", database, str(e))
-        console.error(str(e))
-        raise typer.Exit(10)
-
-
 @app.command("list")
 @require_root
 def list_databases(
@@ -399,282 +231,6 @@ def list_databases(
     console.print(table)
 
 
-@app.command("grant")
-@require_root
-def grant_access(
-    database: str = typer.Option(
-        ..., "--database", "-d",
-        help="Database name",
-    ),
-    username: str = typer.Option(
-        ..., "--user", "-u",
-        help="Username to grant access",
-    ),
-    access: AccessLevel = typer.Option(
-        AccessLevel.READONLY, "--access", "-a",
-        help="Access level",
-    ),
-    # Global options
-    dry_run: bool = typer.Option(False, "--dry-run", help="Preview without executing"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmations"),
-    verbose: int = typer.Option(0, "--verbose", "-v", count=True, help="Increase verbosity"),
-) -> None:
-    """Grant a user access to a database.
-
-    Grants either read-only (SELECT) or read-write (SELECT/INSERT/UPDATE/DELETE)
-    access to all tables in the database.
-
-    Examples:
-
-        sm postgres db grant -d myapp -u reader --access readonly
-
-        sm postgres db grant -d myapp -u writer --access readwrite
-    """
-    ctx = create_context(dry_run=dry_run, yes=yes, verbose=verbose)
-    audit = get_audit_logger()
-
-    # Validate
-    try:
-        validate_identifier(database, "database")
-        validate_identifier(username, "username")
-    except ValidationError as e:
-        console.error(str(e))
-        raise typer.Exit(3)
-
-    # Run preflight checks
-    run_preflight_checks(dry_run=ctx.dry_run, verbose=ctx.is_verbose)
-
-    # Get services
-    executor, pg, _ = _get_services(ctx)
-
-    # Check database exists
-    if not pg.database_exists(database):
-        console.error(f"Database '{database}' does not exist")
-        raise typer.Exit(1)
-
-    # Check user exists
-    if not pg.user_exists(username):
-        console.error(f"User '{username}' does not exist")
-        raise typer.Exit(1)
-
-    # Confirmation
-    console.print()
-    console.print("[bold]Grant Configuration[/bold]")
-    console.print(f"  Database: {database}")
-    console.print(f"  User:     {username}")
-    console.print(f"  Access:   {access.value}")
-    console.print()
-
-    if not yes and not dry_run:
-        if not console.confirm(f"Grant {access.value} access on '{database}' to '{username}'?"):
-            console.warn("Operation cancelled")
-            raise typer.Exit(0)
-
-    try:
-        if access == AccessLevel.READONLY:
-            pg.grant_readonly(database, username)
-        else:
-            pg.grant_readwrite(database, username)
-
-        # Log success
-        audit.log_success(
-            AuditEventType.USER_GRANT,
-            "database",
-            database,
-            message=f"Granted {access.value} access to {username}",
-        )
-
-        console.print()
-        console.summary(
-            "Access Granted",
-            {
-                "Database": database,
-                "User": username,
-                "Access": access.value,
-            },
-        )
-
-    except PostgresError as e:
-        audit.log_failure(AuditEventType.USER_GRANT, "database", database, str(e))
-        console.error(str(e))
-        raise typer.Exit(10)
-
-
-@app.command("create-readonly-user")
-@require_root
-def create_readonly_user(
-    database: str = typer.Option(
-        ..., "--database", "-d",
-        help="Database name (must exist)",
-    ),
-    username: Optional[str] = typer.Option(
-        None, "--user", "-u",
-        help="Username (default: <database>_readonly)",
-    ),
-    password: Optional[str] = typer.Option(
-        None, "--password", "-p",
-        help="Password (auto-generated if not provided)",
-        hide_input=True,
-    ),
-    skip_pgbouncer: bool = typer.Option(
-        False, "--skip-pgbouncer",
-        help="Skip PgBouncer configuration",
-    ),
-    # Global options
-    dry_run: bool = typer.Option(False, "--dry-run", help="Preview without executing"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmations"),
-    verbose: int = typer.Option(0, "--verbose", "-v", count=True, help="Increase verbosity"),
-) -> None:
-    """Create a read-only user for an existing database.
-
-    Creates a new user with SELECT-only access to all tables.
-    Useful for analytics, reporting, or read replicas.
-
-    Examples:
-
-        sm postgres db create-readonly-user -d myapp
-
-        sm postgres db create-readonly-user -d myapp -u analytics
-    """
-    ctx = create_context(dry_run=dry_run, yes=yes, verbose=verbose)
-    audit = get_audit_logger()
-    creds = get_credential_manager()
-
-    # Default username
-    if not username:
-        username = f"{database}_readonly"
-
-    # Validate
-    try:
-        validate_identifier(database, "database")
-        validate_identifier(username, "username")
-    except ValidationError as e:
-        console.error(str(e))
-        raise typer.Exit(3)
-
-    # Run preflight checks
-    run_preflight_checks(dry_run=ctx.dry_run, verbose=ctx.is_verbose)
-
-    # Get services
-    executor, pg, pgb = _get_services(ctx)
-
-    # Check database exists
-    if not pg.database_exists(database):
-        console.error(f"Database '{database}' does not exist")
-        raise typer.Exit(1)
-
-    # Check if user already exists (idempotency)
-    user_exists = pg.user_exists(username)
-
-    if user_exists:
-        console.info(f"User '{username}' already exists")
-        console.info("Ensuring read-only grants are correct...")
-
-        try:
-            # Just ensure grants are correct
-            pg.grant_readonly(database, username)
-
-            # Update PgBouncer if needed
-            if not skip_pgbouncer and pgb.is_installed():
-                scram_hash = pg.get_scram_hash(username)
-                if scram_hash:
-                    pgb.update_userlist(username, scram_hash)
-                pgb.reload()
-
-            # Log success
-            audit.log_success(
-                AuditEventType.USER_GRANT,
-                "user",
-                username,
-                message=f"Read-only grants verified for {database} (user already exists)",
-            )
-
-            console.print()
-            console.summary(
-                "Read-Only Access Verified",
-                {
-                    "Database": database,
-                    "User": f"{username} (read-only)",
-                    "Status": "User exists, grants verified",
-                },
-            )
-            return
-
-        except PostgresError as e:
-            audit.log_failure(AuditEventType.USER_GRANT, "user", username, str(e))
-            console.error(str(e))
-            raise typer.Exit(10)
-
-    # User doesn't exist - proceed with creation
-    # Ensure password
-    if password:
-        final_password = password
-    else:
-        final_password, _ = creds.ensure_password(username, database, dry_run=dry_run)
-
-    # Confirmation
-    console.print()
-    console.print("[bold]Configuration[/bold]")
-    console.print(f"  Database:  {database}")
-    console.print(f"  User:      {username} (read-only)")
-    console.print(f"  PgBouncer: {'Skipped' if skip_pgbouncer else 'Enabled'}")
-    console.print()
-
-    if not yes and not dry_run:
-        if not console.confirm(f"Create read-only user '{username}' for '{database}'?"):
-            console.warn("Operation cancelled")
-            raise typer.Exit(0)
-
-    try:
-        with executor.transaction() as rollback:
-            # Create user
-            pg.create_user(username, final_password, rollback=rollback)
-
-            # Grant read-only access
-            pg.grant_readonly(database, username)
-
-            # Verify connection
-            pg.verify_connection(database, username, final_password)
-
-            # Update PgBouncer
-            if not skip_pgbouncer and pgb.is_installed():
-                scram_hash = pg.get_scram_hash(username)
-                if scram_hash:
-                    pgb.update_userlist(username, scram_hash)
-                pgb.reload()
-
-            rollback.commit()
-
-        # Store password
-        if not dry_run:
-            creds.store_password(final_password, username, database)
-
-        # Log success
-        audit.log_success(
-            AuditEventType.USER_CREATE,
-            "user",
-            username,
-            message=f"Read-only user created for {database}",
-        )
-
-        # Summary
-        pass_file = creds.get_password_path(username, database)
-        console.print()
-        console.summary(
-            "Read-Only User Created",
-            {
-                "Database": database,
-                "User": f"{username} (read-only)",
-                "Password file": str(pass_file),
-            },
-        )
-
-    except PostgresError as e:
-        audit.log_failure(AuditEventType.USER_CREATE, "user", username, str(e))
-        console.error(str(e))
-        raise typer.Exit(10)
-
-
 @app.command("drop")
 @require_root
 @require_force("Dropping databases permanently deletes all data")
@@ -683,7 +239,7 @@ def drop_database(
         ..., "--database", "-d",
         help="Database name to drop",
     ),
-    confirm_name: Optional[str] = typer.Option(
+    confirm_name: str | None = typer.Option(
         None, "--confirm-name",
         help="Confirm database name (required)",
     ),
@@ -746,7 +302,7 @@ def drop_database(
 
     # Confirmation
     console.print()
-    console.print("[bold red]⚠️  CRITICAL: Database Deletion[/bold red]")
+    console.print("[bold red]CRITICAL: Database Deletion[/bold red]")
     console.print(f"  Database: {name}")
     console.print()
     console.print("[red]This will PERMANENTLY DELETE all data![/red]")
@@ -926,7 +482,7 @@ def reset_database(
         console.print()
         console.success(f"Database '{name}' reset successfully")
         console.print(f"  Objects dropped: {total_objects}")
-        console.print(f"  Status: All schemas recreated empty")
+        console.print("  Status: All schemas recreated empty")
 
     except PostgresError as e:
         audit.log_failure(AuditEventType.DATABASE_MODIFY, "database", name, str(e))
@@ -934,6 +490,171 @@ def reset_database(
         raise typer.Exit(10)
 
 
+# ============================================================================
+# Extension subcommands
+# ============================================================================
+
+@extension_app.command("enable")
+@require_root
+def enable_extension(
+    database: str = typer.Option(
+        ..., "--database", "-d",
+        help="Database name",
+    ),
+    extension: str = typer.Option(
+        "vector", "--extension", "-e",
+        help=f"Extension name (supported: {', '.join(sorted(EXTENSION_PACKAGES.keys()))})",
+    ),
+    schema: str = typer.Option(
+        "public", "--schema", "-s",
+        help="Schema to install the extension into",
+    ),
+    # Global options
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview without executing"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmations"),
+    verbose: int = typer.Option(0, "--verbose", "-v", count=True, help="Increase verbosity"),
+) -> None:
+    """Enable an extension on a database.
+
+    Installs the required system package and enables the extension.
+
+    Examples:
+
+        sm postgres db extension enable -d myapp
+
+        sm postgres db extension enable -d myapp -e vector
+
+        sm postgres db extension enable -d myapp --dry-run
+    """
+    ctx = create_context(dry_run=dry_run, yes=yes, verbose=verbose)
+    audit = get_audit_logger()
+
+    # Validate
+    try:
+        validate_identifier(database, "database")
+    except Exception as e:
+        console.error(str(e))
+        raise typer.Exit(3)
+
+    # Run preflight checks
+    run_preflight_checks(dry_run=ctx.dry_run, verbose=ctx.is_verbose)
+
+    # Get services
+    executor, pg, _ = _get_services(ctx)
+
+    # Check database exists
+    if not pg.database_exists(database):
+        console.error(f"Database '{database}' does not exist")
+        raise typer.Exit(1)
+
+    # Check if extension is already enabled
+    if pg.extension_exists(database, extension):
+        console.info(f"Extension '{extension}' already enabled on '{database}'")
+        return
+
+    # Confirmation
+    console.print()
+    console.print("[bold]Configuration[/bold]")
+    console.print(f"  Database:  {database}")
+    console.print(f"  Extension: {extension}")
+    console.print(f"  Schema:    {schema}")
+    console.print()
+
+    if not yes and not dry_run:
+        if not console.confirm(f"Enable extension '{extension}' on '{database}'?"):
+            console.warn("Operation cancelled")
+            raise typer.Exit(0)
+
+    try:
+        with executor.transaction() as rollback:
+            # Install the extension package
+            pg.install_extension_package(extension)
+
+            # Enable the extension
+            pg.enable_extension(database, extension, schema=schema, rollback=rollback)
+
+            rollback.commit()
+
+        # Log success
+        audit.log_success(
+            AuditEventType.EXTENSION_ENABLE,
+            "extension",
+            f"{database}/{extension}",
+            message=f"Extension '{extension}' enabled on database '{database}'",
+        )
+
+        # Summary
+        console.print()
+        console.summary(
+            "Extension Enabled",
+            {
+                "Database": database,
+                "Extension": extension,
+                "Schema": schema,
+            },
+        )
+
+    except PostgresError as e:
+        audit.log_failure(AuditEventType.EXTENSION_ENABLE, "extension", f"{database}/{extension}", str(e))
+        console.error(str(e))
+        raise typer.Exit(10)
+
+
+@extension_app.command("list")
+@require_root
+def list_extensions(
+    database: str = typer.Option(
+        ..., "--database", "-d",
+        help="Database name",
+    ),
+    verbose: int = typer.Option(0, "--verbose", "-v", count=True, help="Increase verbosity"),
+) -> None:
+    """List enabled extensions on a database.
+
+    Shows all installed extensions with their versions and schemas.
+
+    Example:
+
+        sm postgres db extension list -d myapp
+    """
+    ctx = create_context(verbose=verbose)
+
+    # Validate
+    try:
+        validate_identifier(database, "database")
+    except Exception as e:
+        console.error(str(e))
+        raise typer.Exit(3)
+
+    # Get services
+    executor, pg, _ = _get_services(ctx)
+
+    # Check database exists
+    if not pg.database_exists(database):
+        console.error(f"Database '{database}' does not exist")
+        raise typer.Exit(1)
+
+    extensions = pg.list_extensions(database)
+
+    if not extensions:
+        console.info(f"No extensions enabled on '{database}'")
+        return
+
+    # Build table
+    table = Table(title=f"Extensions on '{database}'", show_header=True)
+    table.add_column("Extension", style="cyan")
+    table.add_column("Version")
+    table.add_column("Schema")
+
+    for ext in extensions:
+        table.add_row(ext.name, ext.version, ext.schema)
+
+    console.print(table)
+
+
+# Register extension subgroup
+app.add_typer(extension_app, name="extension")
+
 # Register ownership commands
 app.command("ownership")(ownership_command)
-app.command("transfer-ownership")(transfer_ownership_command)
+app.command("transfer")(transfer_ownership_command)

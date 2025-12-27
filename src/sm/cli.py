@@ -72,11 +72,11 @@ mongodb_app = typer.Typer(
 # Import sub-commands
 from sm.commands.postgres.user import app as postgres_user_app
 from sm.commands.postgres.db import app as postgres_db_app
+from sm.commands.postgres.db_user import app as postgres_db_user_app
 from sm.commands.postgres.optimize import app as postgres_optimize_app
-from sm.commands.postgres.backup import app as postgres_backup_app
-from sm.commands.postgres.restore import app as postgres_restore_app
+from sm.commands.postgres.pgdump import app as postgres_pgdump_app
+from sm.commands.postgres.backrest import app as postgres_backrest_app
 from sm.commands.postgres.migrate import app as postgres_migrate_app
-from sm.commands.postgres.extension import app as postgres_extension_app
 from sm.commands.docker import app as docker_commands_app
 from sm.commands.firewall import app as firewall_app
 from sm.commands.mongodb.user import app as mongodb_user_app
@@ -88,11 +88,11 @@ from sm.commands.proxy import app as proxy_app
 # Register postgres sub-commands
 postgres_app.add_typer(postgres_user_app, name="user")
 postgres_app.add_typer(postgres_db_app, name="db")
+postgres_app.add_typer(postgres_db_user_app, name="db-user")
 postgres_app.add_typer(postgres_optimize_app, name="optimize")
-postgres_app.add_typer(postgres_backup_app, name="backup")
-postgres_app.add_typer(postgres_restore_app, name="restore")
+postgres_app.add_typer(postgres_pgdump_app, name="pgdump")
+postgres_app.add_typer(postgres_backrest_app, name="backrest")
 postgres_app.add_typer(postgres_migrate_app, name="migrate")
-postgres_app.add_typer(postgres_extension_app, name="extension")
 
 # Register mongodb sub-commands
 mongodb_app.add_typer(mongodb_user_app, name="user")
